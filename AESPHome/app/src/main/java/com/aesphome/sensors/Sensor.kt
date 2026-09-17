@@ -181,7 +181,10 @@ object Sensors {
     AccelerometerXSensor, AccelerometerYSensor, AccelerometerZSensor,
     GyroscopeXSensor, GyroscopeYSensor, GyroscopeZSensor,
     MagneticFieldXSensor, MagneticFieldYSensor, MagneticFieldZSensor,
-    MjpegServerRunningSensor
+    MjpegServerRunningSensor,
+    PersonDetectedSensor, PersonCountSensor,
+    RtspServerRunningSensor,
+    UpdateAvailableSensor
   )
 
   val readSensors: List<ReadSensor> = listOf(
@@ -207,9 +210,14 @@ object Sensors {
     WifiSsidSensor,
     WifiBssidSensor,
     ChargingSourceSensor,
-    ForegroundAppSensor
+    ForegroundAppSensor,
+    MjpegUrlSensor,
+    RtspUrlSensor
   )
-  val textSensors: List<TextSensor> = readTextSensors
+  // LatestVersionSensor is a plain TextSensor (not ReadTextSensor) — its value is pushed by
+  // AutoUpdateService's own check timer, not polled by diagnosticsLoop, so it's listed here
+  // but deliberately left out of readTextSensors above.
+  val textSensors: List<TextSensor> = readTextSensors + listOf(LatestVersionSensor)
 
   val services: List<Service> = listOf(
     MdnsService,
@@ -220,11 +228,17 @@ object Sensors {
     ScreenBrightnessService,
     ScreenOrientationService,
     MjpegServerService,
-    AppLauncherService
+    AppLauncherService,
+    PersonDetectorService,
+    RtspServerService,
+    AutoUpdateService
   )
 
 
-  val buttons: List<Button> = listOf(IdentifyButton, ScreenWakeButton, ScreenSleepButton)
+  val buttons: List<Button> = listOf(
+    IdentifyButton, ScreenWakeButton, ScreenSleepButton,
+    CheckForUpdateButton, InstallUpdateButton
+  )
   val switches: List<SwitchEntity> = listOf(
     BluetoothSwitch,
     KeepScreenOnSwitch,

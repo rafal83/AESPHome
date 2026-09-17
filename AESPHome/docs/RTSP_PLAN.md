@@ -1,90 +1,99 @@
-# H.264 / RTSP — Technical Plan (not implemented)
+# H.264 / RTSP
 
-Per the task's own instruction for this area: MJPEG is implemented and working
-(`docs/IMPLEMENTATION_REPORT.md`); H.264/RTSP is a substantially larger effort and is
-documented here instead of attempted as a partial/unverified implementation.
+## Status: implemented, NOT verified against a real player
+
+`rtsp_server.kt` implements the architecture this document originally proposed (kept below,
+since the implementation follows it directly). Unlike every other feature in this codebase,
+**this one could not be tested end to end** — the environment it was built in had no
+camera-equipped Android device to actually run it on. What was verified:
+
+- The app compiles and packages with it (`./gradlew clean test assembleDebug`).
+- The one genuinely pure piece of protocol logic — Annex-B NAL splitting and RFC 6184 FU-A
+  header byte-packing — is unit tested (`RtspAnnexBTest.kt`) against hand-computed expected
+  bytes.
+- The RTP header layout, SDP `fmtp` line, and RTSP method set were written directly against
+  RFC 6184 / RFC 2326, not from memory of "roughly how RTSP works."
+
+What was **not** verified, because it requires a real camera and a real player (VLC/ffplay/
+go2rtc) neither of which were available:
+
+- That Camera2's encoder-`Surface` + `MediaCodec` pipeline actually produces valid Annex-B
+  output on real hardware the way it's assumed to (this is well-documented, standard Android
+  behavior, but "documented" isn't "observed here").
+- That a real RTSP client accepts this server always answering `SETUP` with
+  `RTP/AVP/TCP;interleaved=0-1` regardless of what transport it originally proposed. This is
+  a known-working pattern for TCP-only RTSP servers in general, but it's a claim about other
+  people's client software, not something this branch exercised against one.
+- That the SDP `sprop-parameter-sets`/`profile-level-id` values a real decoder receives
+  actually let it initialize correctly, and that the in-band SPS/PPS-before-every-IDR
+  re-insertion is both correctly formed and actually necessary/sufficient in practice.
+
+**Before relying on this**: install the APK on a real device, enable Camera + RTSP Server, and
+point `ffplay rtsp://<ip>:8554/aesphome` (or VLC, or go2rtc) at it. If it doesn't play, the
+first things to check, in order: (1) does `ffplay -rtsp_transport tcp` work when plain `ffplay`
+doesn't — confirms whether the "always answer TCP" SETUP behavior above is the issue; (2)
+capture the raw TCP stream (e.g. Wireshark on the RTSP port) and check the RTP sequence
+numbers/timestamps are monotonically increasing and the first few NAL units look like a
+plausible SPS (starts `0x67`) — confirms whether the problem is Camera2/MediaCodec output
+format vs. this file's RTP packetization.
+
+## Implemented
+
+- `switch`-free — `Service` `rtsp_server`, `number.rtsp_port` (default 8554),
+  `number.rtsp_bitrate_kbps` (default 1500), `select.rtsp_resolution` (640x480/1280x720, no
+  finer control — kept simple rather than exposing every MediaCodec knob),
+  `binary_sensor.rtsp_server_running`, `text_sensor.rtsp_url`.
+- Camera2 → `MediaCodec` (`video/avc`, `COLOR_FormatSurface` input, hardware encoder when the
+  device has one, 15fps, 2s I-frame interval) — a dedicated capture session separate from
+  `CameraService`'s JPEG pipeline (see `rtsp_server.kt`'s file header for why sharing one
+  wasn't attempted).
+- SPS/PPS extracted from `MediaCodec`'s `BUFFER_FLAG_CODEC_CONFIG` buffer, cached, sent in the
+  SDP (`sprop-parameter-sets`) and re-inserted in-band before every IDR.
+- RFC 6184 RTP packetization: single-NAL-unit packets when a NAL fits one RTP payload,
+  FU-A fragmentation otherwise.
+- RTP-over-TCP interleaved only (RFC 2326 §10.12) — no UDP transport (see "why RTP-over-TCP"
+  below).
+- RTSP methods: `OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `TEARDOWN`. No `PAUSE`/seeking — this
+  is a live proxy, not VOD.
+- Multiple simultaneous clients share one encoder (same broadcast-to-listeners pattern
+  `CameraService.addFrameListener`/`broadcastFrame` already established for MJPEG, applied
+  here to encoded access units instead of JPEGs).
+- Encoder/camera only run while at least one session is `PLAY`ing — never held open just
+  because the RTSP server itself is enabled.
+
+## Not implemented
+
+- **Authentication** — no RTSP `Authorization` (Basic/Digest), unlike MJPEG's token. Network-
+  level access control (the same LAN/VLAN segmentation any camera stream should already have)
+  is the mitigation until this exists.
+- **RTP-over-UDP** — see "why RTP-over-TCP" below.
+- **MTU-aware fragmentation tuning / RTCP** — `MAX_RTP_PAYLOAD` is a fixed, conservative 1400
+  bytes; no path-MTU discovery. An RTCP channel is declared in `SETUP`'s interleaved range but
+  nothing is ever sent on it (receiver reports are simply never read either).
+- **Shared camera session with the JPEG pipeline** — RTSP and Camera/MJPEG cannot run
+  simultaneously against the same physical lens; Android's own camera framework enforces this
+  (a clean `ERROR_CAMERA_IN_USE` callback, not a crash) rather than this app coordinating it.
 
 ## Why this is a separate tier of work from MJPEG
 
 MJPEG reuses `CameraService`'s existing `ImageReader`(JPEG)-based Camera2 pipeline as-is —
 each frame is already a complete, independent JPEG, so serving it over HTTP is just framing
-bytes that already exist. H.264 needs an entirely different capture surface (a YUV/private
+bytes that already exist. H.264 needs an entirely different capture surface (an encoder
 `Surface` feeding `MediaCodec`, not a JPEG `ImageReader`), a stateful encoder pipeline, RTP
 packetization, and a real RTSP server — none of which share code with the existing pipeline.
 
-## Proposed architecture
+## Why RTP-over-TCP (not UDP) for the first implementation
 
-```
-Camera2 (encoder-input Surface)
-   -> MediaCodec (video/avc, hardware encoder when available)
-   -> access-unit callback (SPS/PPS + NAL units, via MediaCodec.Callback or BufferInfo polling)
-   -> RTP packetizer (RFC 6184 H.264 payload)
-   -> RTSP session per client (DESCRIBE/SETUP/PLAY/TEARDOWN)
-   -> rtsp://<ip>:8554/aesphome
-```
+- Avoids a second port to open/firewall alongside the RTSP control connection.
+- Avoids RTP timestamp/jitter-buffer edge cases that show up more under real UDP loss —
+  harder to reason about without a real network and real player to observe them with.
+- Many real IP cameras only ever offer TCP interleaved and work fine with ffmpeg/VLC/go2rtc;
+  it's a legitimate, not merely simplified, choice for a first implementation.
 
-### Camera2 → MediaCodec
+RTP-over-UDP could follow once TCP interleaving is confirmed working end to end on real
+hardware.
 
-- A second capture session target: `MediaCodec.createInputSurface()` passed to Camera2 as an
-  additional output alongside (or instead of, while streaming) the existing JPEG
-  `ImageReader` — Camera2 supports multiple simultaneous output surfaces from one session, so
-  this *can* share the same open camera device as MJPEG/HA snapshots, but not the same
-  `CaptureRequest` target list without care (JPEG capture and continuous encoder feed have
-  different ideal capture rates/latency behavior) — needs real-device testing to confirm a
-  shared session doesn't starve one consumer or the other; a dedicated capture session used
-  only while RTSP has an active client (closed the rest of the time) is the safer starting
-  point.
-- `MediaFormat` for `MediaCodec.createEncoderByType("video/avc")`: resolution matching one of
-  `CameraService`'s existing resolution options, a modest bitrate (e.g. 2 Mbps at 720p) and
-  keyframe interval (e.g. 2s) tuned for a proxy — not for archival quality — and I-frame
-  interval short enough that a client joining mid-stream doesn't wait long for a keyframe.
-- Use the hardware encoder when available (`MediaCodecList` query for a hardware-backed
-  AVC encoder) — a software fallback exists on every device but would defeat the point on the
-  low-end/older hardware this project targets.
-
-### SPS/PPS
-
-- `MediaCodec` delivers the SPS/PPS as a `BUFFER_FLAG_CODEC_CONFIG` buffer once, before the
-  first frame — cache it and re-send it (as RTSP's `sprop-parameter-sets` in the SDP, per
-  RFC 6184 §8.1) on every new client's `DESCRIBE`, and re-insert it in-band before every
-  keyframe so a client that joins mid-GOP can still decode from the next I-frame.
-
-### RTP packetization
-
-- RFC 6184 single-NAL and FU-A fragmentation (most encoded frames exceed one UDP-safe MTU) —
-  this is genuinely non-trivial to get byte-exact; a subtly wrong FU-A header is the single
-  most common source of "plays for a second then corrupts" bugs in a hand-rolled RTP sender.
-- RTP-over-TCP (interleaved, RFC 2326 §10.12) is the pragmatic choice for a first
-  implementation — avoids a second UDP port to open/firewall and avoids RTP timestamp/jitter
-  buffer edge cases that show up more with real UDP loss; RTP-over-UDP can follow once TCP
-  interleaving is verified working end to end.
-
-### RTSP server
-
-- Minimal method set: `OPTIONS`, `DESCRIBE` (returns an SDP `Content-Type: application/sdp`
-  body derived from the cached SPS/PPS), `SETUP` (allocate a session, negotiate interleaved
-  channel numbers), `PLAY`, `TEARDOWN`. No `PAUSE`/seeking — this is a live proxy, not VOD.
-- Same hand-rolled plain-socket style as `esphome.kt`/`mjpeg_server.kt` — no new dependency;
-  the RTSP control protocol itself is simple, line-based text (much like the MJPEG server's
-  own request parsing), and RTP-over-TCP interleaving means no separate RTP socket code path
-  either.
-
-### Multiple clients
-
-- Camera2 → MediaCodec is one encoder producing one elementary stream; multiple RTSP clients
-  should share it (same encoder output fanned out to each session's RTP packetizer/socket),
-  the same broadcast-listener pattern `CameraService.addFrameListener`/`broadcastFrame`
-  already establishes for MJPEG — reused here for encoded access units instead of JPEGs.
-
-### Authentication
-
-- Same lightweight token-in-URL approach as MJPEG (`?token=...` — RTSP doesn't have a
-  standard equivalent to a query string, so this would need to ride on RTSP Basic/Digest
-  `Authorization` on `SETUP`/`DESCRIBE` instead), configured from the same place in the app.
-
-### go2rtc / Frigate integration
-
-Once implemented, the intended config mirrors the MJPEG examples in `README.md`:
+## go2rtc / Frigate integration (as documented in README.md)
 
 ```yaml
 go2rtc:
@@ -100,19 +109,3 @@ cameras:
           roles:
             - detect
 ```
-
-## Suggested order of implementation
-
-1. `MediaCodec` encoder fed from a still/synthetic `Surface` first (verify SPS/PPS + NAL
-   output alone, no networking) before touching Camera2's dual-surface capture session.
-2. RTSP `DESCRIBE`/`SETUP`/`PLAY` against a single hardcoded client, RTP-over-TCP only, no
-   fragmentation (small frames / low resolution) — get one client playing back correctly in
-   VLC or ffplay before anything else.
-3. FU-A fragmentation for real-resolution frames.
-4. Multiple simultaneous clients.
-5. Camera2 dual-surface sharing with the existing JPEG pipeline (or confirm it needs to stay
-   a separate capture session while RTSP is active).
-
-Each step above is independently testable against a real player (VLC/ffplay/go2rtc) before
-moving to the next — this is not a good candidate for "implement it all, then debug," given
-how failure-opaque a wrong RTP/SDP byte tends to be from the symptom alone.

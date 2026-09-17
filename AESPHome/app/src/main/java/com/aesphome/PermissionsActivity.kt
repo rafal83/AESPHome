@@ -104,6 +104,18 @@ class PermissionsActivity : Activity() {
       // the service has actually been started (MainActivity does this every time it opens).
       PermissionRow("Foreground Service",
           { if (AESPHomeService.instance != null) PermissionStatus.GRANTED else PermissionStatus.DENIED }),
+
+      PermissionRow("Install Unknown Apps (auto-update)",
+          {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+              if (packageManager.canRequestPackageInstalls()) PermissionStatus.GRANTED else PermissionStatus.DENIED
+            } else PermissionStatus.GRANTED // pre-8: a single device-wide "Unknown sources" toggle, not per-app
+          },
+          {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+              startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            }
+          }),
     )
   }
 

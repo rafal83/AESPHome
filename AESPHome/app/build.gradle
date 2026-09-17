@@ -55,10 +55,26 @@ android {
   kotlinOptions {
     jvmTarget = '17'
   }
+
+  // Keeps the bundled TFLite model (assets/efficientdet_lite0.tflite, ~4.3MB) uncompressed in
+  // the APK — TFLite's Task Library memory-maps the model file directly; a compressed asset
+  // would need to be copied out and decompressed before it could be loaded.
+  aaptOptions {
+    noCompress "tflite"
+  }
 }
 
 dependencies {
   implementation 'org.videolan.android:libvlc-all:3.7.0'
+  // FileProvider only — the small, foundational compat library, not a UI/heavy framework
+  // dependency. Needed to hand a downloaded update APK to the system installer without
+  // exposing a raw file:// path (blocked by StrictMode on API 24+).
+  implementation 'androidx.core:core:1.13.1'
+  // Person-presence detection (sensors/person_detector.kt) — the high-level Task Library API
+  // (not the raw Interpreter API) so this app doesn't hand-roll anchor decoding/NMS; CPU-only
+  // (no tensorflow-lite-gpu) since the GPU delegate's device/driver compatibility is far less
+  // predictable than CPU across the old/low-end Android hardware this project targets.
+  implementation 'org.tensorflow:tensorflow-lite-task-vision:0.4.4'
   testImplementation 'junit:junit:4.13.2'
 }
 

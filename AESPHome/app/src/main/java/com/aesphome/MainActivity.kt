@@ -320,11 +320,9 @@ class MainActivity : Activity() {
       "Home Assistant: not connected"
     }
 
-    mjpegStatusText?.text = if (isEnabled(this, MjpegServerService)) {
-      "MJPEG: ${MjpegServerService.url(this) ?: "starting..."}"
-    } else {
-      ""
-    }
+    val mjpegLine = if (isEnabled(this, MjpegServerService)) "MJPEG: ${MjpegServerService.url(this) ?: "starting..."}" else null
+    val rtspLine = if (isEnabled(this, RtspServerService)) "RTSP: ${RtspServerService.url(this) ?: "starting..."}" else null
+    mjpegStatusText?.text = listOfNotNull(mjpegLine, rtspLine).joinToString("\n")
   }
 
   // A thin line separating one component's group from the next.

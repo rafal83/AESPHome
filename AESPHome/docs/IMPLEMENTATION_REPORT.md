@@ -33,22 +33,61 @@ proxy messages); every other feature is a new file plus one line in `Sensors`.
 - **App Launcher**: `select.launch_app`, restricted to an explicit per-app whitelist chosen on
   a new Allowed Apps screen — reuses `BluetoothCommandService`'s existing "command dropdown"
   pattern rather than exposing arbitrary Intents to the network.
-- **Passive Bluetooth LE proxy**: `switch.bluetooth_proxy` — advertises
-  `bluetooth_proxy_feature_flags` (`PASSIVE_SCAN | RAW_ADVERTISEMENTS`) and forwards every BLE
-  advertisement Android's scanner sees as `BluetoothLERawAdvertisementsResponse` (id 93),
-  matching current ESPHome firmware's wire format. See `docs/BLUETOOTH_PROXY.md` for what's
-  in and out of scope.
+- **Bluetooth proxy, passive AND active**: `switch.bluetooth_proxy` advertises
+  `bluetooth_proxy_feature_flags` (`PASSIVE_SCAN | RAW_ADVERTISEMENTS | ACTIVE_CONNECTIONS`)
+  and forwards every BLE advertisement Android's scanner sees as
+  `BluetoothLERawAdvertisementsResponse` (id 93), matching current ESPHome firmware's wire
+  format — **and** implements the active-connection side (`sensors/bluetooth_gatt.kt`): HA
+  connecting through this device to a remote BLE peripheral (connect/disconnect, GATT service
+  discovery, characteristic/descriptor read/write, notifications), each connection's GATT
+  operations serialized through a FIFO queue (Android silently drops a second in-flight
+  operation on the same connection otherwise). Pairing and cache-clearing are not implemented
+  (explicit failure response, not a hang). See `docs/BLUETOOTH_PROXY.md`.
 - **MJPEG HTTP server**: `/camera.jpg` and `/camera.mjpeg`, reusing `CameraService`'s existing
   Camera2/JPEG pipeline (no second camera open) via a small broadcast-listener hook, with a
   configurable port/max-FPS and a lightweight per-device token (`?token=...`, shown in the app
-  alongside the URL, toggle in-app only — deliberately not exposed as an HA entity, so no HA
-  user can remotely disable the one thing gating access to the raw feed).
+  and via `text_sensor.mjpeg_url`, toggle in-app only — deliberately not exposed as an HA
+  entity, so no HA user can remotely disable the one thing gating access to the raw feed).
+- **RTSP / H.264 server**: `rtsp://<ip>:8554/aesphome` — Camera2 → `MediaCodec` (hardware AVC
+  encoder) → RFC 6184 RTP packetization → RTP-over-TCP interleaved → a minimal hand-rolled
+  RTSP server (OPTIONS/DESCRIBE/SETUP/PLAY/TEARDOWN). **Could not be verified against a real
+  player** (no camera-equipped device was available while building this) — see
+  `docs/RTSP_PLAN.md`'s verification section before relying on it. Uses its own camera
+  session, separate from Camera/MJPEG's (can't run both against the same lens at once).
+- **Person detection**: `binary_sensor.person_detected` / `sensor.person_count` — an on-device
+  TFLite object detector (Task Library + a bundled EfficientDet-Lite0 model, ~4.3MB,
+  `assets/efficientdet_lite0.tflite`, CPU-only) run against whatever frame `CameraService`'s
+  pipeline already produced, filtered to the "person" class. Runs on its own dedicated
+  executor thread — never on `CameraService`'s capture thread — and drops (never queues) a
+  frame that arrives while a previous one is still being classified. This was an explicit,
+  user-chosen dependency trade-off (see the "TFLite embarqué" choice in this session) — the
+  APK grows by roughly 18MB (native TFLite libraries across ABIs + the model).
+- **Auto update**: `sensors/auto_update.kt` periodically checks
+  `github.com/rafal83/AESPHome`'s latest release (`GET /repos/.../releases/latest`, platform
+  `HttpURLConnection`/`org.json` only — no new networking/JSON dependency) and compares its tag
+  against `BuildConfig.VERSION_NAME`. `binary_sensor.update_available` and
+  `text_sensor.latest_available_version` report the result; `button.install_update` downloads
+  the release's `.apk` asset and hands it to the system package installer via a `FileProvider`
+  URI. The final install step always needs one tap on Android's own confirmation screen —
+  there is no silent-install path without root/device-owner (same constraint as everything
+  else in this branch), so this automates checking and downloading, not the security-gated
+  last step. Adds one dependency, `androidx.core:core` (for `FileProvider` only — installing
+  from a raw `file://` path is blocked by StrictMode on API 24+).
+- **`esphome_version` no longer reports this app's own version**: it was pinned to
+  `BuildConfig.VERSION_NAME`, which made HA's ESPHome integration compare our low version
+  number (`0.1.0`) against real ESPHome releases and nag about an "update available" — for a
+  device with no firmware to update. `DeviceInfoResponse.esphome_version` now reports a fixed,
+  real, recent ESPHome release string (`REPORTED_ESPHOME_VERSION` in `esphome.kt`); this
+  app's actual version is still visible via `text_sensor.app_version`, unchanged.
 - **Permissions screen**: Granted/Denied/Not-supported for every permission an implemented
   feature depends on, each with its own Enable button — nothing requested in bulk on first
   launch.
-- **Unit tests**: protobuf varint/message encode-decode round trips, the BLE MAC→uint64
-  packing (checked against ESPHome firmware's own byte order), screen-brightness conversion,
-  and MJPEG header/boundary formatting — all pure-Kotlin, no Robolectric/device needed.
+- **Unit tests**: protobuf varint/message encode-decode round trips (including the 64-bit
+  path GATT addresses need), the BLE MAC→uint64 packing (checked against ESPHome firmware's
+  own byte order, cross-checked against a second upstream source file), GATT UUID short-form
+  detection, screen-brightness conversion, MJPEG header/boundary formatting, and RTSP's
+  Annex-B NAL splitting + RFC 6184 FU-A header byte-packing — all pure-Kotlin, no Robolectric/
+  device needed.
 - **CI**: `.github/workflows/android-build.yml` (push/PR/manual — test + assembleDebug +
   upload artifact) and `.github/workflows/release.yml` (`v*` tags — test + assembleRelease
   attempt, falling back to a clearly-labeled unsigned debug build, attached to a GitHub
@@ -81,10 +120,13 @@ proxy messages); every other feature is a new file plus one line in `Sensors`.
   `wifi_rssi.kt` — stopped fabricating a value (`0.0f`) when unavailable; return `null`.
 - `app/src/main/AndroidManifest.xml` — new permissions (below), two new activities, the
   Device Admin receiver, a `<queries>` block for the app launcher.
-- `app/build.gradle` — JUnit test dependency.
-- New files: one per feature listed above under Implemented — see `git log` for the exact
-  list; nothing outside `app/src/main/java/com/aesphome/**` and `docs/**` was touched besides
-  the build/CI files below.
+- `app/build.gradle` — JUnit test dependency, `tensorflow-lite-task-vision` (person
+  detection), `aaptOptions { noCompress "tflite" }`, conditional release `signingConfig`.
+- New files: one per feature listed above under Implemented (`sensors/bluetooth_gatt.kt`,
+  `sensors/rtsp_server.kt`, `sensors/person_detector.kt`, `sensors/stream_urls.kt`, plus every
+  screen/diagnostics/sensor file from the first pass) — see `git log` for the exact list;
+  nothing outside `app/src/main/java/com/aesphome/**`, `app/src/main/assets/**`, and
+  `docs/**` was touched besides the build/CI files below.
 
 # New ESPHome entities
 
@@ -118,9 +160,19 @@ proxy messages); every other feature is a new file plus one line in `Sensors`.
 | `sensor.gyroscope_x/y/z` | sensor | rad/s |
 | `sensor.magnetic_field_x/y/z` | sensor | µT |
 | `select.launch_app` | select | Whitelisted apps only |
-| `switch.bluetooth_proxy` | switch | Passive BLE scan → HA Bluetooth integration |
+| `switch.bluetooth_proxy` | switch | Passive scan + active GATT connections → HA Bluetooth integration |
 | `binary_sensor.mjpeg_server_running` | binary_sensor | MJPEG server up/down |
 | `number.mjpeg_port` / `mjpeg_max_fps` | number | MJPEG server config |
+| `text_sensor.mjpeg_url` | text_sensor | Ready-to-use MJPEG URL |
+| `binary_sensor.rtsp_server_running` | binary_sensor | RTSP server up/down |
+| `number.rtsp_port` / `rtsp_bitrate_kbps` | number | RTSP server config |
+| `select.rtsp_resolution` | select | 640x480 / 1280x720 |
+| `text_sensor.rtsp_url` | text_sensor | Ready-to-use RTSP URL |
+| `binary_sensor.person_detected` | binary_sensor | On-device TFLite detection, "person" class |
+| `sensor.person_count` | sensor | Count of "person" detections in the last inference |
+| `binary_sensor.update_available` | binary_sensor | Newer GitHub release exists |
+| `text_sensor.latest_available_version` | text_sensor | That release's tag |
+| `button.check_for_update` / `button.install_update` | button | Manual check; download + open installer |
 
 `binary_sensor.screen_on` and `binary_sensor.charging` (as `battery_charging`) already
 existed before this branch and are unchanged.
@@ -134,6 +186,11 @@ existed before this branch and are unchanged.
 | `BLUETOOTH_SCAN` (`neverForLocation`) / `ACCESS_FINE_LOCATION` (≤ API 30) | Passive BLE proxy scanning |
 | `PACKAGE_USAGE_STATS` | `text_sensor.foreground_app` |
 | `FOREGROUND_SERVICE_CAMERA` / `_MICROPHONE` / `_CONNECTED_DEVICE` | Required alongside the existing `FOREGROUND_SERVICE_MEDIA_PLAYBACK` now that the service's declared type set covers what it actually does |
+| `REQUEST_INSTALL_PACKAGES` | `button.install_update` launching the system package installer |
+
+The active Bluetooth GATT proxy and the RTSP server add no *new* permissions — `BLUETOOTH_CONNECT`
+was already required unconditionally (`bluetooth_switch.kt`), and RTSP reuses the `CAMERA`
+permission Camera/MJPEG already require.
 
 Device Admin is *not* a manifest `<uses-permission>` — it's the `AESPHomeDeviceAdminReceiver`
 `<receiver>` (`BIND_DEVICE_ADMIN`), activated per-device from the Permissions screen, never
@@ -168,10 +225,18 @@ requested automatically.
 
 # Remaining work
 
-- **Active Bluetooth GATT proxy** (connections, pairing, read/write/notify) — see
-  `docs/BLUETOOTH_PROXY.md` for the full breakdown of why this is out of scope for this pass
-  and what implementing it would take.
-- **H.264/RTSP** — not implemented; `docs/RTSP_PLAN.md` has the architecture.
+- **Bluetooth GATT: pairing, cache clearing, connection-parameter negotiation, MTU
+  negotiation** — see `docs/BLUETOOTH_PROXY.md`'s "What's NOT implemented" section. Connect/
+  discover/read/write/notify all work; these are the parts tied to security material or
+  throughput tuning that don't change whether a basic GATT session works.
+- **RTSP: real-device verification** — implemented, compiles, and the one pure piece of its
+  protocol logic (Annex-B splitting, FU-A header packing) is unit tested, but it was never run
+  against a real camera + real player. See `docs/RTSP_PLAN.md`'s verification section for what
+  to check first if it doesn't play. Also no authentication (unlike MJPEG's token), no
+  RTP-over-UDP, no RTCP.
+- **Person detection: only "person" from a general 91-class COCO model** — no dedicated
+  face/pose model, no per-region-of-interest configuration, no drawing of bounding boxes back
+  onto the MJPEG/RTSP stream (the detection result is a plain HA sensor, not an overlay).
 - **Noise/encrypted ESPHome API transport** — audited, not implemented. The server currently
   only speaks the plaintext preamble (`0x00`); it never sends or accepts a Noise (`0x01`)
   frame. Implementing ESPHome's Noise handshake correctly means a full Noise_NNpsk0
@@ -183,7 +248,6 @@ requested automatically.
   rather than hand-rolling the cryptography, and land it as its own change with its own
   focused review.
 - **Foreground service type live updates** — see the Android version limitations note above.
-- **RTSP-adjacent**: nothing beyond the plan doc.
 - **UI polish**: the spec's proposed section grouping (Screen/Camera/Bluetooth/Sensors/
   Android/Permissions/Diagnostics) is only partially reflected — `MainActivity` still lists
   every `Toggleable` alphabetically in one flat list (its existing, working layout), plus new
@@ -197,8 +261,10 @@ requested automatically.
 ./gradlew clean test assembleDebug
 ```
 
-Result: **BUILD SUCCESSFUL**, 22 unit tests passing, `app-debug.apk` produced at
-`app/build/outputs/apk/debug/app-debug.apk`.
+Result: **BUILD SUCCESSFUL**, 44 unit tests passing, `app-debug.apk` produced at
+`app/build/outputs/apk/debug/app-debug.apk` (~112MB — up from ~94MB after this branch's
+baseline audit; the growth is almost entirely the TFLite native libraries + bundled model for
+person detection, a user-chosen trade-off — see Implemented above).
 
 The same command (`./gradlew clean test assembleDebug`, from the repo's `AESPHome/`
 directory) is what `.github/workflows/android-build.yml` runs — verified locally against the

@@ -129,8 +129,11 @@ New Features
 | Uptime, memory, storage, Wi-Fi frequency/link speed, battery voltage/current/power | — (device-dependent) | `sensor.*` |
 | Proximity, pressure, humidity, ambient temperature, accelerometer/gyroscope/magnetic field (x/y/z) | Matching hardware sensor (entity hidden if absent) | `sensor.*` |
 | App launcher | — (whitelist chosen in-app) | `select.launch_app` |
-| Bluetooth LE proxy (passive scan) | `BLUETOOTH_SCAN` (12+) / location (≤11) | `switch.bluetooth_proxy` |
-| MJPEG camera server | Camera enabled | `binary_sensor.mjpeg_server_running`, `number.mjpeg_port`, `number.mjpeg_max_fps` |
+| Bluetooth LE proxy (passive scan + active GATT connections) | `BLUETOOTH_SCAN` (12+) / location (≤11) + `BLUETOOTH_CONNECT` (already required) | `switch.bluetooth_proxy` |
+| MJPEG camera server | Camera enabled | `binary_sensor.mjpeg_server_running`, `number.mjpeg_port`, `number.mjpeg_max_fps`, `text_sensor.mjpeg_url` |
+| RTSP / H.264 server ⚠️ not verified on real hardware | Camera permission | `binary_sensor.rtsp_server_running`, `number.rtsp_port`, `number.rtsp_bitrate_kbps`, `select.rtsp_resolution`, `text_sensor.rtsp_url` |
+| Person detection (on-device TFLite) | Camera enabled | `binary_sensor.person_detected`, `sensor.person_count` |
+| Auto update check | `REQUEST_INSTALL_PACKAGES` (install step only) | `binary_sensor.update_available`, `text_sensor.latest_available_version`, `button.check_for_update`, `button.install_update` |
 
 See `AESPHome/docs/IMPLEMENTATION_REPORT.md` for the full entity list and exactly what
 permission each feature needs and why.
@@ -152,9 +155,10 @@ Enable button that opens the right Android settings screen.
 ### Bluetooth Proxy
 
 Enabling `switch.bluetooth_proxy` makes the device show up to Home Assistant's own Bluetooth
-integration as a passive BLE scanner — the same thing a real ESPHome Bluetooth Proxy does for
-advertisement-only BLE devices (most sensors/trackers). Active GATT connections aren't
-implemented — see `AESPHome/docs/BLUETOOTH_PROXY.md`.
+integration as a full Bluetooth Proxy: passive advertisement scanning (most sensors/trackers)
+**and** active GATT connections (HA connecting through this device to read/write/subscribe to
+a BLE peripheral's characteristics). Pairing and cache-clearing aren't implemented — see
+`AESPHome/docs/BLUETOOTH_PROXY.md` for exactly what is.
 
 ### MJPEG / go2rtc / Frigate
 
@@ -197,9 +201,27 @@ cameras:
             - detect
 ```
 
-RTSP itself (the `rtsp://127.0.0.1:8554/aesphome` input above, which go2rtc re-serves from
-the MJPEG source) is not implemented by this app directly — see
-`AESPHome/docs/RTSP_PLAN.md` for the plan if that changes.
+A direct `rtsp://<device-ip>:8554/aesphome` H.264 stream is also implemented (Camera2 →
+MediaCodec → RTP-over-TCP) — see `AESPHome/docs/RTSP_PLAN.md`, including an important caveat:
+it was never verified against a real player, only built and unit-tested for the pure protocol
+logic. Test it on real hardware before relying on it.
+
+### Person Detection
+
+Enabling **Person Detection** (alongside Camera) runs a small on-device TFLite model
+(EfficientDet-Lite0, bundled, CPU-only, ~4.3MB) against the camera feed and reports
+`binary_sensor.person_detected` / `sensor.person_count` to Home Assistant — no image or video
+data leaves the device. This is a genuinely new dependency (`tensorflow-lite-task-vision`),
+adding roughly 18MB to the APK; it's opt-in and off by default.
+
+### Auto Update
+
+With **Auto Update Check** enabled, the app periodically compares its own version against the
+latest release on `github.com/rafal83/AESPHome` and reports `binary_sensor.update_available`
+/ `text_sensor.latest_available_version`. `button.install_update` (or the in-app equivalent)
+downloads that release's APK and opens Android's own install-confirmation screen — the last
+tap is unavoidable without root or device-owner status, so this automates checking and
+downloading, not the final install itself.
 
 ---
 

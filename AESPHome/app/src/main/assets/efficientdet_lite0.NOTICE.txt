@@ -1,0 +1,13 @@
+efficientdet_lite0.tflite
+
+Source: https://storage.googleapis.com/download.tensorflow.org/models/tflite/task_library/object_detection/android/lite-model_efficientdet_lite0_detection_metadata_1.tflite
+Published by: Google, as part of the official TensorFlow Lite Task Library object-detection
+sample (the same model Google's own "TFLite Object Detection" Android codelab/example app
+bundles).
+License: Apache License 2.0 (standard licensing for TensorFlow/TensorFlow Hub's official
+published models). Verify against the current terms at https://www.tensorflow.org/lite/models
+before redistributing under different terms.
+
+Used by sensors/person_detector.kt for on-device person-presence detection
+(binary_sensor.person_detected / sensor.person_count) — COCO-trained, 91 object classes, only
+the "person" class result is used.

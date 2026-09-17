@@ -93,6 +93,15 @@ private const val F_HELLO_REQUEST_CLIENT_INFO = 1 // HelloRequest field 1 — se
 private const val F_DEVICE_INFO_NAME = 2
 private const val F_DEVICE_INFO_MAC_ADDRESS = 3
 private const val F_DEVICE_INFO_ESPHOME_VERSION = 4
+
+// Reported as DeviceInfoResponse's esphome_version — deliberately NOT this app's own version
+// (that's text_sensor.app_version, sensors/diagnostics_text.kt). HA's ESPHome integration
+// compares this string against the latest published ESPHome release and nags about an
+// available firmware update if it looks old; this device has no firmware to update (it's this
+// APK), so reporting our own low version number here only produces a spurious, permanently-
+// unresolvable "update available" warning. Bump this occasionally to a real, released ESPHome
+// version to keep it current — it does not need to track this app's own release cadence.
+private const val REPORTED_ESPHOME_VERSION = "2026.9.0"
 private const val F_DEVICE_INFO_MODEL = 6
 private const val F_DEVICE_INFO_MANUFACTURER = 12
 private const val F_DEVICE_INFO_FRIENDLY_NAME = 13
@@ -806,7 +815,7 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
             val builder = ProtobufMessageBuilder()
               .string(F_DEVICE_INFO_NAME, name)
               .string(F_DEVICE_INFO_MAC_ADDRESS, mac)
-              .string(F_DEVICE_INFO_ESPHOME_VERSION, BuildConfig.VERSION_NAME)
+              .string(F_DEVICE_INFO_ESPHOME_VERSION, REPORTED_ESPHOME_VERSION)
               .string(F_DEVICE_INFO_MODEL, "Android Simulating ESPHome Device")
               .string(F_DEVICE_INFO_MANUFACTURER, "ÆSPHome")
               .string(F_DEVICE_INFO_FRIENDLY_NAME, friendlyName)
@@ -848,11 +857,11 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
               val (type, bytes) = selectListMessage(setting)
               send(conn, type, bytes)
             }
-            for (button in Sensors.buttons.filter { isEnabled(appContext, it) }) {
+            for (button in Sensors.buttons.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
               val (type, bytes) = buttonListMessage(button)
               send(conn, type, bytes)
             }
-            for (switch in Sensors.switches.filter { isEnabled(appContext, it) }) {
+            for (switch in Sensors.switches.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
               val (type, bytes) = switchListMessage(switch)
               send(conn, type, bytes)
             }
@@ -884,7 +893,7 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
               val (type, bytes) = selectStateMessage(setting, getSelectSetting(appContext, setting))
               send(conn, type, bytes)
             }
-            for (switch in Sensors.switches.filter { isEnabled(appContext, it) }) {
+            for (switch in Sensors.switches.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
               val (type, bytes) = switchStateMessage(switch, switch.isOn(appContext))
               send(conn, type, bytes)
             }

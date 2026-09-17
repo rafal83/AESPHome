@@ -48,6 +48,12 @@
     </intent>
   </queries>
 
+  <!-- Auto-update (sensors/auto_update.kt): lets this app launch the system package installer
+       for an update APK it downloaded itself — the user still has to tap "Install" on
+       Android's own confirmation screen (unavoidable without root/device-owner, same as any
+       other sideloaded-app updater such as F-Droid). -->
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
   <application
       android:label="ÆSPHome"
       android:allowBackup="true"
@@ -109,6 +115,18 @@
           android:name="android.accessibilityservice.config"
           android:resource="@xml/accessibility_service_config" />
     </service>
+
+    <!-- Hands the downloaded update APK (auto_update.kt) to the system installer as a
+         content:// URI instead of a raw file:// path — required on API 24+. -->
+    <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.fileprovider"
+        android:exported="false"
+        android:grantUriPermissions="true">
+      <meta-data
+          android:name="android.support.FILE_PROVIDER_PATHS"
+          android:resource="@xml/file_paths" />
+    </provider>
 
   </application>
 </manifest>
