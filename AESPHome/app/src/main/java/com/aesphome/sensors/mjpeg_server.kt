@@ -41,6 +41,20 @@ private const val BOUNDARY = "aesphomeframe"
 private const val STREAM_KEEPALIVE_MS = 2000L // comfortably under CAMERA_STREAM_TIMEOUT_MS
 private const val SINGLE_SHOT_WAIT_MS = 4000L
 
+// Pure header builders, kept separate from the socket I/O around them so they're unit-
+// testable without a live connection (see MjpegServerHeadersTest).
+internal fun httpStatusHeader(code: Int, text: String): String =
+    "HTTP/1.0 $code $text\r\nConnection: close\r\n\r\n"
+
+internal fun jpegResponseHeader(contentLength: Int): String =
+    "HTTP/1.0 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: $contentLength\r\nConnection: close\r\n\r\n"
+
+internal fun multipartStreamHeader(boundary: String = BOUNDARY): String =
+    "HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=$boundary\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+
+internal fun multipartChunkHeader(contentLength: Int, boundary: String = BOUNDARY): String =
+    "--$boundary\r\nContent-Type: image/jpeg\r\nContent-Length: $contentLength\r\n\r\n"
+
 object MjpegServerService : Service {
   override val id                  = "mjpeg_server"
   override val label               = "MJPEG Server"
@@ -157,7 +171,7 @@ object MjpegServerService : Service {
   }
 
   private fun writeStatus(socket: Socket, code: Int, text: String) {
-    socket.getOutputStream().write("HTTP/1.0 $code $text\r\nConnection: close\r\n\r\n".toByteArray())
+    socket.getOutputStream().write(httpStatusHeader(code, text).toByteArray())
   }
 
   private fun serveSingle(context: Context, socket: Socket) {
@@ -176,7 +190,7 @@ object MjpegServerService : Service {
     if (frame == null) { writeStatus(socket, 503, "Service Unavailable"); return }
 
     val out = socket.getOutputStream()
-    out.write("HTTP/1.0 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\nConnection: close\r\n\r\n".toByteArray())
+    out.write(jpegResponseHeader(frame.size).toByteArray())
     out.write(frame)
     out.flush()
   }
@@ -190,7 +204,7 @@ object MjpegServerService : Service {
     CameraService.addFrameListener(listener)
     try {
       val out = socket.getOutputStream()
-      out.write("HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=$BOUNDARY\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n".toByteArray())
+      out.write(multipartStreamHeader().toByteArray())
 
       var lastSentMs = 0L
       var lastKeepAliveMs = 0L
@@ -203,7 +217,7 @@ object MjpegServerService : Service {
         val frame = queue.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
         if (now - lastSentMs < fpsMinIntervalMs) continue
         lastSentMs = now
-        out.write("--$BOUNDARY\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n".toByteArray())
+        out.write(multipartChunkHeader(frame.size).toByteArray())
         out.write(frame)
         out.write("\r\n".toByteArray())
         out.flush()

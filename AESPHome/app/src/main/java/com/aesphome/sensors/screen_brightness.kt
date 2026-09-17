@@ -82,8 +82,9 @@ object ScreenBrightnessService : Service {
     observer = null
   }
 
-  private fun rawToPct(raw: Int): Float = (raw * 100f / 255f).roundToInt().coerceIn(1, 100).toFloat()
-  private fun pctToRaw(pct: Float): Int = (pct * 255f / 100f).roundToInt().coerceIn(1, 255)
+  // internal (not private) so unit tests can exercise the conversion directly.
+  internal fun rawToPct(raw: Int): Float = (raw * 100f / 255f).roundToInt().coerceIn(1, 100).toFloat()
+  internal fun pctToRaw(pct: Float): Int = (pct * 255f / 100f).roundToInt().coerceIn(1, 255)
 
   private fun applyBrightness(context: Context) {
     if (!Settings.System.canWrite(context)) {
