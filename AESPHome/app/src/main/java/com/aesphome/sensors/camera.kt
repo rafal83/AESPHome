@@ -19,6 +19,7 @@ import android.os.HandlerThread
 import android.util.Log
 import android.util.Size
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
@@ -291,7 +292,12 @@ object CameraService : Service {
   fun stopStreamNow() { streamTimeout = 0L }
 
   // CameraImageRequest: single=one-shot capture; stream=true starts (or refreshes) a
-  // continuous stream that stops itself once HA stops re-requesting it.
+  // continuous stream that stops itself once HA stops re-requesting it. The MJPEG server
+  // (mjpeg_server.kt) calls this exact same entry point to keep the shared stream alive for
+  // its own viewers — from its perspective it's just another "client" asking to keep
+  // streaming, same as HA re-sending CameraImageRequest(stream=true); this is what lets an
+  // HA camera view and an MJPEG viewer share one live capture instead of opening the camera
+  // twice.
   fun onImageRequest(context: Context, stream: Boolean) {
     if (stream) {
       val alreadyStreaming = streamTimeout > 0
@@ -300,15 +306,35 @@ object CameraService : Service {
 
       Log.i(TAG, "Camera: stream capture started")
       Thread({
-        capture(context, streaming = true, isRunning = ::isStreamActive) { AESPHomeService.instance?.pushCameraFrame(it) }
+        capture(context, streaming = true, isRunning = ::isStreamActive) { broadcastFrame(it) }
         streamTimeout = 0L
         Log.i(TAG, "Camera: stream capture stopped")
       }, "AESPHomeCameraStream").start()
     } else if (streamTimeout == 0L) {
       // A running stream already sends frames continuously, so it satisfies this on its own.
       Log.i(TAG, "Camera: one-shot capture requested")
-      capture(context, streaming = false) { AESPHomeService.instance?.pushCameraFrame(it) }
+      capture(context, streaming = false) { broadcastFrame(it) }
     }
+  }
+
+  // Every captured frame's single delivery point: HA (if connected), the MJPEG server's
+  // latest-frame cache, and any of its live stream listeners — whichever combination is
+  // actually subscribed right now. Nothing here knows or cares which of those triggered the
+  // capture in the first place.
+  @Volatile private var lastFrame: ByteArray? = null
+  @Volatile private var lastFrameAtMs: Long = 0L
+  private val frameListeners = CopyOnWriteArrayList<(ByteArray) -> Unit>()
+
+  fun latestFrame(): ByteArray? = lastFrame
+  fun latestFrameAgeMs(): Long? = lastFrame?.let { System.currentTimeMillis() - lastFrameAtMs }
+  fun addFrameListener(listener: (ByteArray) -> Unit) = frameListeners.add(listener)
+  fun removeFrameListener(listener: (ByteArray) -> Unit) { frameListeners.remove(listener) }
+
+  private fun broadcastFrame(jpeg: ByteArray) {
+    lastFrame = jpeg
+    lastFrameAtMs = System.currentTimeMillis()
+    AESPHomeService.instance?.pushCameraFrame(jpeg)
+    for (listener in frameListeners) listener(jpeg)
   }
 
   // Independent of AESPHome's diagnosticsLoop (which polls readSensors on a fixed 60s
@@ -324,8 +350,9 @@ object CameraService : Service {
     val context = appContext ?: return
     while (idleRunning) {
       val idleSeconds = getSetting(context, idleFpsSetting)
-      if (idleSeconds > 0 && AESPHomeService.instance?.hasActiveConnection == true && !isStreamActive()) {
-        capture(context, streaming = false) { AESPHomeService.instance?.pushCameraFrame(it) }
+      val hasViewer = AESPHomeService.instance?.hasActiveConnection == true || frameListeners.isNotEmpty()
+      if (idleSeconds > 0 && hasViewer && !isStreamActive()) {
+        capture(context, streaming = false) { broadcastFrame(it) }
       }
       val sleepMs = if (idleSeconds > 0) (idleSeconds * 1000).toLong() else Long.MAX_VALUE
       try { Thread.sleep(sleepMs) } catch (_: InterruptedException) {}

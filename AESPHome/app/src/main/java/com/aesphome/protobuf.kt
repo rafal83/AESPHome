@@ -19,7 +19,13 @@ public class ProtobufMessageBuilder {
     fun varint(fieldNumber: Int, value: Int) = apply {
         fields.add(VarintField(fieldNumber, value))
     }
-    
+
+    // 64-bit varint — needed for fields declared `uint64` in api.proto (e.g. a BLE MAC
+    // address packed into the low 48 bits) that don't fit a 32-bit Int.
+    fun varintLong(fieldNumber: Int, value: Long) = apply {
+        fields.add(VarintField64(fieldNumber, value))
+    }
+
     fun bytes(fieldNumber: Int, data: ByteArray) = apply {
         fields.add(BytesField(fieldNumber, data))
     }
@@ -57,6 +63,15 @@ public class ProtobufMessageBuilder {
         override fun writeTo(buffer: ByteArray, offset: Int): Int {
             var current = writeVarint(buffer, offset, tag)
             return writeVarint(buffer, current, value)
+        }
+    }
+
+    private class VarintField64(override val number: Int, val value: Long) : Field {
+        val tag = (number shl 3) or 0
+        override fun getTotalSize() = varintSize(tag) + varintSize64(value)
+        override fun writeTo(buffer: ByteArray, offset: Int): Int {
+            var current = writeVarint(buffer, offset, tag)
+            return writeVarint64(buffer, current, value)
         }
     }
 
@@ -118,6 +133,28 @@ public class ProtobufMessageBuilder {
                 v = v ushr 7
             }
             buffer[currentOffset++] = (v and 0x7F).toByte()
+            return currentOffset
+        }
+
+        // Long-valued counterparts of varintSize/writeVarint, for fields wider than 32 bits.
+        private fun varintSize64(value: Long): Int {
+            var v = value
+            var size = 0
+            do {
+                size++
+                v = v ushr 7
+            } while (v != 0L)
+            return size
+        }
+
+        private fun writeVarint64(buffer: ByteArray, offset: Int, value: Long): Int {
+            var v = value
+            var currentOffset = offset
+            while (v and -0x80L != 0L) {
+                buffer[currentOffset++] = ((v and 0x7FL) or 0x80L).toByte()
+                v = v ushr 7
+            }
+            buffer[currentOffset++] = (v and 0x7FL).toByte()
             return currentOffset
         }
     }

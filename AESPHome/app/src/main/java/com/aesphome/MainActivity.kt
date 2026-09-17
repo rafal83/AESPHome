@@ -1,5 +1,6 @@
 package com.aesphome
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Notification
@@ -9,12 +10,16 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.text.InputType
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -50,7 +55,18 @@ class AESPHomeService : Service() {
         .setContentText("Running in the background.")
         .setSmallIcon(android.R.drawable.ic_media_play)
         .build()
-    startForeground(1, notification)
+
+    // Android 14+ requires the foreground service type actually passed here to be backed
+    // by a currently-granted permission for camera/microphone specifically — passing one
+    // that isn't yet granted throws instead of just being ignored. Only include a type
+    // whose permission is already granted; mediaPlayback carries no such gate. This means
+    // the declared type can lag reality if a permission is granted after the service is
+    // already running (not re-evaluated automatically) — see docs/IMPLEMENTATION_REPORT.md.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      startForeground(1, notification, currentForegroundServiceType())
+    } else {
+      startForeground(1, notification)
+    }
 
     // AESPHome.start() blocks forever (accept loop), so it needs its own thread.
     // Startup happens here too, after `instance` is set, so anything that reports
@@ -79,15 +95,47 @@ class AESPHomeService : Service() {
   }
 
   override fun onBind(intent: Intent?): IBinder? = null
+
+  // Every type here is also declared on the <service> in the manifest — this only ever
+  // narrows that set down to what's actually permitted right now, never widens it.
+  private fun currentForegroundServiceType(): Int {
+    var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+    if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+      type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+    }
+    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+      type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+    }
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+        checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+      type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+    }
+    return type
+  }
 }
 
 class BootReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
-    context.startForegroundService(Intent(context, AESPHomeService::class.java))
+    if (!StartAtBootSwitch.isOn(context)) return
+    try {
+      context.startForegroundService(Intent(context, AESPHomeService::class.java))
+    } catch (e: Exception) {
+      // Android 12+ can refuse a foreground service start from certain background/broadcast
+      // contexts — BOOT_COMPLETED is normally exempt, but this keeps a future OS restriction
+      // from crashing the receiver instead of just leaving the service stopped.
+      Log.e(TAG, "startForegroundService from boot failed", e)
+    }
   }
 }
 
 class MainActivity : Activity() {
+  companion object {
+    // Weak-in-spirit reference for features that need to touch the live Activity window
+    // while it happens to be visible (orientation fallback, screen-sleep dim fallback) —
+    // cleared in onDestroy() below so nothing holds this past the Activity's own lifecycle.
+    var instance: MainActivity? = null
+  }
+
   private val settingInputs = mutableListOf<Pair<Setting, EditText>>()
   private val selectSettingSpinners = mutableListOf<Pair<SelectSetting, Spinner>>()
   private var wifiIpText: TextView? = null
@@ -105,6 +153,7 @@ class MainActivity : Activity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    instance = this
 
     // MainActivity can be the very first thing to touch Sensors.selectSettings (e.g. first
     // launch, before AESPHomeService has run CameraService.start()), so refresh this here
@@ -359,5 +408,10 @@ class MainActivity : Activity() {
     super.onPause()
     refreshHandler.removeCallbacks(refreshRunnable)
     AESPHomeService.instance?.onMediaPlayerVolumeChanged = null
+  }
+
+  override fun onDestroy() {
+    super.onDestroy()
+    if (instance === this) instance = null
   }
 }

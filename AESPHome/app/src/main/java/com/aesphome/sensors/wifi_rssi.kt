@@ -25,8 +25,9 @@ object WifiRssiSensor : ReadSensor {
   override val icon                   = "mdi:wifi"
   override fun kind(context: Context) = SensorKind.Numeric(unit="dBm", deviceClass="signal_strength")
 
-  override fun read(context: Context): Float {
+  override fun read(context: Context): Float? {
     val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
-    return wifiManager.connectionInfo.rssi.toFloat()
+    val rssi = wifiManager.connectionInfo?.rssi ?: return null
+    return if (rssi == Int.MIN_VALUE) null else rssi.toFloat() // Int.MIN_VALUE: no current connection
   }
 }

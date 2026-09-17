@@ -44,6 +44,11 @@ private const val MESSAGE_BUTTON_COMMAND_REQUEST = 62
 private const val MESSAGE_LIST_ENTITIES_SWITCH = 17
 private const val MESSAGE_SWITCH_STATE_RESPONSE = 26
 private const val MESSAGE_SWITCH_COMMAND_REQUEST = 33
+private const val MESSAGE_LIST_ENTITIES_TEXT_SENSOR = 18
+private const val MESSAGE_TEXT_SENSOR_STATE = 27
+private const val MESSAGE_SUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST = 66
+private const val MESSAGE_UNSUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST = 87
+private const val MESSAGE_BLE_RAW_ADVERTISEMENTS_RESPONSE = 93
 
 // Shared across every ListEntities*Response (InfoResponseProtoMessage base class):
 // object_id, key, and name are always fields 1, 2, 3, regardless of entity type.
@@ -69,6 +74,14 @@ private const val F_DEVICE_INFO_ESPHOME_VERSION = 4
 private const val F_DEVICE_INFO_MODEL = 6
 private const val F_DEVICE_INFO_MANUFACTURER = 12
 private const val F_DEVICE_INFO_FRIENDLY_NAME = 13
+private const val F_DEVICE_INFO_BLUETOOTH_PROXY_FEATURE_FLAGS = 15
+
+// BluetoothProxyFeature bitmask (aioesphomeapi model.py) — only the bits this server ever
+// sets: passive scanning, plus raw-advertisement wire format (the only format modern
+// ESPHome/aioesphomeapi still speak — the legacy non-raw BluetoothLEAdvertisementResponse
+// was removed upstream in ESPHome 2025.8.0).
+private const val BLUETOOTH_PROXY_FEATURE_PASSIVE_SCAN = 1
+private const val BLUETOOTH_PROXY_FEATURE_RAW_ADVERTISEMENTS = 1 shl 5
 
 // ListEntitiesBinarySensorResponse fields beyond the shared object_id/key/name
 private const val F_BINARY_SENSOR_DEVICE_CLASS = 5
@@ -91,6 +104,25 @@ private const val F_SENSOR_ENTITY_CATEGORY = 13
 // SensorStateResponse
 private const val F_SENSOR_STATE = 2
 private const val F_SENSOR_MISSING_STATE = 3
+
+// ListEntitiesTextSensorResponse fields beyond the shared object_id/key/name
+private const val F_TEXT_SENSOR_ICON = 5
+private const val F_TEXT_SENSOR_DISABLED_BY_DEFAULT = 6
+private const val F_TEXT_SENSOR_ENTITY_CATEGORY = 7
+
+// TextSensorStateResponse
+private const val F_TEXT_SENSOR_STATE = 2
+private const val F_TEXT_SENSOR_MISSING_STATE = 3
+
+// BluetoothLERawAdvertisementsResponse / BluetoothLERawAdvertisement (nested, repeated field 1)
+private const val F_BLE_ADVERTISEMENTS = 1
+private const val F_BLE_ADV_ADDRESS = 1
+private const val F_BLE_ADV_RSSI = 2
+private const val F_BLE_ADV_ADDRESS_TYPE = 3
+private const val F_BLE_ADV_DATA = 4
+
+// SubscribeBluetoothLEAdvertisementsRequest
+private const val F_SUBSCRIBE_BLE_FLAGS = 1
 
 // ListEntitiesCameraResponse fields beyond the shared object_id/key/name
 private const val F_CAMERA_DISABLED_BY_DEFAULT = 5
@@ -243,8 +275,13 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
   // Let HA know the state of the media player
   private fun notifyMediaPlayerState() = pushToHA(MESSAGE_STATE_RESPONSE, mediaPlayerStatePayload())
 
-  // Generic cache of every sensor's last known value, keyed by Sensor.id
+  // Generic cache of every sensor's last known value, keyed by Sensor.id. Absent from this
+  // map means "never reported" (SubscribeStatesRequest then reports it to HA as
+  // missing_state, rather than a misleading 0), same as an explicit null read.
   private val sensorValues = HashMap<String, Float>()
+
+  // Same idea as sensorValues, for TextSensor.
+  private val sensorTextValues = HashMap<String, String>()
 
   // Called by MediaPlayerService when playback ends on its own — HA otherwise has no way to know.
   internal fun notifyMediaPlayerIdle() = notifyMediaPlayerState()
@@ -254,10 +291,23 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
   // Used by diagnostics loop (only?) to report sensor values to HA
   //
   fun reportSensor(sensor: Sensor, value: Boolean) = reportSensor(sensor, if (value) 1f else 0f)
-  fun reportSensor(sensor: Sensor, value: Float) {
-    if (sensor.kind(appContext) is SensorKind.Binary && sensorValues[sensor.id] == value) return // binary: only send on change
-    sensorValues[sensor.id] = value
+
+  // value == null: the reading is genuinely unavailable right now (e.g. no Wi-Fi link) —
+  // reported to HA as missing_state instead of a fabricated number. Binary sensors are
+  // always non-null (start()/read() only ever report a real on/off) and keep their
+  // only-send-on-change behavior; numeric sensors always send (including the transition
+  // to/from unavailable).
+  fun reportSensor(sensor: Sensor, value: Float?) {
+    if (value != null && sensor.kind(appContext) is SensorKind.Binary && sensorValues[sensor.id] == value) return
+    if (value != null) sensorValues[sensor.id] = value else sensorValues.remove(sensor.id)
     val (type, payload) = stateMessage(sensor, value)
+    pushToHA(type, payload)
+  }
+
+  // Same missing-state convention as reportSensor, for TextSensor.
+  fun reportTextSensor(sensor: TextSensor, value: String?) {
+    if (value != null) sensorTextValues[sensor.id] = value else sensorTextValues.remove(sensor.id)
+    val (type, payload) = textSensorStateMessage(sensor, value)
     pushToHA(type, payload)
   }
 
@@ -554,6 +604,29 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
 
 
   //
+  // text_sensor — same shape as Sensor's binary_sensor/sensor pair, minus a `kind`, plus
+  // missing_state for "genuinely unavailable right now" instead of a fabricated string.
+  //
+  private fun textSensorListMessage(sensor: TextSensor): Pair<Int, ByteArray> =
+    MESSAGE_LIST_ENTITIES_TEXT_SENSOR to ProtobufMessageBuilder()
+      .string(F_OBJECT_ID, sensor.id)
+      .fixed32(F_KEY, sensor.key)
+      .string(F_NAME, sensor.label)
+      .string(F_TEXT_SENSOR_ICON, sensor.icon)
+      .varint(F_TEXT_SENSOR_DISABLED_BY_DEFAULT, if (sensor.enabledByDefaultHa) 0 else 1)
+      .varint(F_TEXT_SENSOR_ENTITY_CATEGORY, sensor.entityCategory.wireValue)
+      .build()
+
+  private fun textSensorStateMessage(sensor: TextSensor, value: String?): Pair<Int, ByteArray> =
+    MESSAGE_TEXT_SENSOR_STATE to ProtobufMessageBuilder()
+      .fixed32(F_ENTITY_KEY, sensor.key)
+      .string(F_TEXT_SENSOR_STATE, value ?: "")
+      .varint(F_TEXT_SENSOR_MISSING_STATE, if (value == null) 1 else 0)
+      .build()
+
+
+
+  //
   // Builds the ListEntities*Response (type + payload)
   //
   private fun listMessage(sensor: Sensor): Pair<Int, ByteArray> {
@@ -599,15 +672,15 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
   //
   //
   //
-  private fun stateMessage(sensor: Sensor, value: Float): Pair<Int, ByteArray> = when (sensor.kind(appContext)) {
+  private fun stateMessage(sensor: Sensor, value: Float?): Pair<Int, ByteArray> = when (sensor.kind(appContext)) {
     is SensorKind.Binary -> MESSAGE_BINARY_SENSOR_STATE to ProtobufMessageBuilder()
       .fixed32(F_ENTITY_KEY, sensor.key)
-      .varint(F_BINARY_SENSOR_STATE, if (value != 0f) 1 else 0)
+      .varint(F_BINARY_SENSOR_STATE, if ((value ?: 0f) != 0f) 1 else 0)
       .build()
     is SensorKind.Numeric -> MESSAGE_SENSOR_STATE to ProtobufMessageBuilder()
       .fixed32(F_ENTITY_KEY, sensor.key)
-      .float(F_SENSOR_STATE, value)
-      .varint(F_SENSOR_MISSING_STATE, 0)
+      .float(F_SENSOR_STATE, value ?: 0f)
+      .varint(F_SENSOR_MISSING_STATE, if (value == null) 1 else 0)
       .build()
   }
 
@@ -661,15 +734,20 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
           // DeviceInfoRequest: static identity info about this device (name, MAC, versions).
           //
           MESSAGE_DEVICE_INFO_REQUEST -> {
-            send(conn, MESSAGE_DEVICE_INFO_RESPONSE,
-              ProtobufMessageBuilder()
-                .string(F_DEVICE_INFO_NAME, name)
-                .string(F_DEVICE_INFO_MAC_ADDRESS, mac)
-                .string(F_DEVICE_INFO_ESPHOME_VERSION, BuildConfig.VERSION_NAME)
-                .string(F_DEVICE_INFO_MODEL, "Android Simulating ESPHome Device")
-                .string(F_DEVICE_INFO_MANUFACTURER, "ÆSPHome")
-                .string(F_DEVICE_INFO_FRIENDLY_NAME, friendlyName)
-                .build())
+            val builder = ProtobufMessageBuilder()
+              .string(F_DEVICE_INFO_NAME, name)
+              .string(F_DEVICE_INFO_MAC_ADDRESS, mac)
+              .string(F_DEVICE_INFO_ESPHOME_VERSION, BuildConfig.VERSION_NAME)
+              .string(F_DEVICE_INFO_MODEL, "Android Simulating ESPHome Device")
+              .string(F_DEVICE_INFO_MANUFACTURER, "ÆSPHome")
+              .string(F_DEVICE_INFO_FRIENDLY_NAME, friendlyName)
+            // Only advertised when the Bluetooth proxy switch is actually enabled — an idle
+            // client shouldn't see a capability this device isn't offering right now.
+            if (isEnabled(appContext, BluetoothProxySwitch)) {
+              builder.varint(F_DEVICE_INFO_BLUETOOTH_PROXY_FEATURE_FLAGS,
+                BLUETOOTH_PROXY_FEATURE_PASSIVE_SCAN or BLUETOOTH_PROXY_FEATURE_RAW_ADVERTISEMENTS)
+            }
+            send(conn, MESSAGE_DEVICE_INFO_RESPONSE, builder.build())
           }
 
 
@@ -685,8 +763,12 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
               val (type, bytes) = cameraEntityListPayload()
               send(conn, type, bytes)
             }
-            for (sensor in Sensors.all.filter { isEnabled(appContext, it) }) {
+            for (sensor in Sensors.all.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
               val (type, bytes) = listMessage(sensor)
+              send(conn, type, bytes)
+            }
+            for (sensor in Sensors.textSensors.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
+              val (type, bytes) = textSensorListMessage(sensor)
               send(conn, type, bytes)
             }
             for (setting in visibleSettings()) {
@@ -717,9 +799,12 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
             if (isEnabled(appContext, MediaPlayerService)){
               send(conn, MESSAGE_STATE_RESPONSE, mediaPlayerStatePayload())
             }
-            for (sensor in Sensors.all.filter { isEnabled(appContext, it) }) {
-              val value = sensorValues[sensor.id] ?: 0f
-              val (type, bytes) = stateMessage(sensor, value)
+            for (sensor in Sensors.all.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
+              val (type, bytes) = stateMessage(sensor, sensorValues[sensor.id]) // null -> missing_state, not fabricated 0
+              send(conn, type, bytes)
+            }
+            for (sensor in Sensors.textSensors.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
+              val (type, bytes) = textSensorStateMessage(sensor, sensorTextValues[sensor.id])
               send(conn, type, bytes)
             }
             for (setting in visibleSettings()) {
@@ -878,6 +963,29 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
             send(conn, type, bytes)
           }
 
+
+          //
+          // SubscribeBluetoothLEAdvertisementsRequest: HA's Bluetooth integration wants this
+          // device to act as a passive BLE proxy — start forwarding whatever
+          // BluetoothProxyService is (or isn't yet) scanning. A no-op if the proxy itself is
+          // disabled; DeviceInfoResponse already didn't advertise the capability in that case,
+          // so a well-behaved client shouldn't send this, but nothing bad happens if it does.
+          //
+          MESSAGE_SUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST -> {
+            bleSubscribed = true
+            Log.i(TAG, "HA subscribed to Bluetooth LE advertisements")
+          }
+
+
+          //
+          // UnsubscribeBluetoothLEAdvertisementsRequest: stop forwarding — connection teardown
+          // (below) covers the same thing if HA disconnects without sending this explicitly.
+          //
+          MESSAGE_UNSUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST -> {
+            bleSubscribed = false
+            Log.i(TAG, "HA unsubscribed from Bluetooth LE advertisements")
+          }
+
         // end when
         }
       }
@@ -886,6 +994,7 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
     } finally {
       MediaPlayerService.stopPlayback()
       CameraService.stopStreamNow()
+      bleSubscribed = false
       activeConn = null
       connectedClientAddress = null
       connectedClientName = null
@@ -896,13 +1005,47 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
 
 
   //
+  // Bluetooth LE passive proxy — BluetoothProxyService (sensors/bluetooth_proxy.kt) owns the
+  // actual scanning and calls this for every advertisement it sees; this is a no-op unless
+  // HA has actually subscribed on the current connection, so a scan running with nobody
+  // listening doesn't spam a socket write for every single advertisement.
+  //
+  @Volatile private var bleSubscribed = false
+
+  // Called directly on whatever thread the BLE scan callback fires on (never the main
+  // thread — see BluetoothProxyService, which registers its callback on its own
+  // HandlerThread) — a scan can report several advertisements a second, so unlike
+  // reportSensor/pushToHA this deliberately does NOT spend a new Thread per call; send()
+  // itself is @Synchronized, so concurrent callers just serialize on the one socket.
+  fun pushBleAdvertisement(address: Long, rssi: Int, addressType: Int, data: ByteArray) {
+    if (!bleSubscribed) return
+    val conn = activeConn ?: return
+    val advertisement = ProtobufMessageBuilder()
+      .varintLong(F_BLE_ADV_ADDRESS, address)
+      .varint(F_BLE_ADV_RSSI, rssi)
+      .varint(F_BLE_ADV_ADDRESS_TYPE, addressType)
+      .bytes(F_BLE_ADV_DATA, data)
+      .build()
+    val payload = ProtobufMessageBuilder().bytes(F_BLE_ADVERTISEMENTS, advertisement).build()
+    try { send(conn, MESSAGE_BLE_RAW_ADVERTISEMENTS_RESPONSE, payload) }
+    catch (e: Exception) { Log.e(TAG, "BLE advertisement push failed: ${e.message}") }
+  }
+
+
+
+  //
   // Report some sensors every 60 seconds in thread
   //
   private fun diagnosticsLoop() {
     while (true) {
       for (sensor in Sensors.readSensors) {
-        if (isEnabled(appContext, sensor)) {
+        if (isEnabled(appContext, sensor) && sensor.isAvailable(appContext)) {
           reportSensor(sensor, sensor.read(appContext))
+        }
+      }
+      for (sensor in Sensors.readTextSensors) {
+        if (isEnabled(appContext, sensor) && sensor.isAvailable(appContext)) {
+          reportTextSensor(sensor, sensor.read(appContext))
         }
       }
       Thread.sleep(60000)

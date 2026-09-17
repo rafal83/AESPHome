@@ -30,6 +30,14 @@ interface Toggleable {
   val icon: String get() = "" // MDI icon override, e.g. "mdi:battery"; empty lets HA pick its own default
   val settings: List<Setting> get() = emptyList()
   val selectSettings: List<SelectSetting> get() = emptyList()
+
+  // Whether the underlying hardware/OS feature this Toggleable depends on actually exists
+  // on this device — checked in addition to (not instead of) the user's own enable flag,
+  // so a sensor with no matching hardware is never advertised to HA with a permanently
+  // dead/fabricated value. Defaults to true (every pre-existing Toggleable is unaffected);
+  // only entities tied to optional hardware (a specific SensorManager sensor type, etc.)
+  // need to override this.
+  fun isAvailable(context: Context): Boolean = true
 }
 
 sealed class SensorKind {
@@ -131,14 +139,28 @@ interface Startable {
 interface EventSensor : Sensor, Startable
 
 // A sensor with no natural event — polled on a timer by AESPHome instead.
+// Returns null when the value genuinely isn't available right now (e.g. Wi-Fi link info
+// while disconnected) — reported to HA as missing_state rather than a fabricated number.
 interface ReadSensor : Sensor {
-  fun read(context: Context): Float
+  fun read(context: Context): Float?
 }
 
 // A Toggleable background feature with no ESPHome entity of its own — nothing for
 // Home Assistant to see, just a setting plus a start()/stop() lifecycle. mDNS
 // advertisement and the media player's playback lifecycle are Services, not Sensors.
 interface Service : Toggleable, Startable
+
+// A Toggleable that shows up to Home Assistant as an ESPHome text_sensor — same shape as
+// Sensor, minus `kind()` (text_sensor has no unit/device-class/state-class to pick between).
+interface TextSensor : Toggleable {
+  val key: Int // ESPHome wire-protocol entity key — must be unique per device
+}
+
+// A TextSensor with no natural event — polled on a timer by AESPHome instead, same as
+// ReadSensor. Returns null when genuinely unavailable, reported as missing_state.
+interface ReadTextSensor : TextSensor {
+  fun read(context: Context): String?
+}
 
 object Sensors {
 
@@ -151,25 +173,63 @@ object Sensors {
     CameraLuxSensor,
     LightSensor,
     DecibelMeterSensor,
-    DeviceOrientationSensor
+    DeviceOrientationSensor,
+    ProximitySensor,
+    PressureSensor,
+    HumiditySensor,
+    AmbientTemperatureSensor,
+    AccelerometerXSensor, AccelerometerYSensor, AccelerometerZSensor,
+    GyroscopeXSensor, GyroscopeYSensor, GyroscopeZSensor,
+    MagneticFieldXSensor, MagneticFieldYSensor, MagneticFieldZSensor,
+    MjpegServerRunningSensor
   )
 
   val readSensors: List<ReadSensor> = listOf(
     WifiRssiSensor,
-    BatteryTemperatureC
+    BatteryTemperatureC,
+    UptimeSensor,
+    FreeMemorySensor,
+    TotalMemorySensor,
+    FreeStorageSensor,
+    TotalStorageSensor,
+    WifiFrequencySensor,
+    WifiLinkSpeedSensor,
+    BatteryVoltageSensor,
+    BatteryCurrentSensor,
+    BatteryPowerSensor
   )
+
+  val readTextSensors: List<ReadTextSensor> = listOf(
+    AndroidVersionSensor,
+    DeviceModelSensor,
+    AppVersionSensor,
+    IpAddressSensor,
+    WifiSsidSensor,
+    WifiBssidSensor,
+    ChargingSourceSensor,
+    ForegroundAppSensor
+  )
+  val textSensors: List<TextSensor> = readTextSensors
 
   val services: List<Service> = listOf(
     MdnsService,
     MediaPlayerService,
     CameraService,
     SystemVolumeService,
-    BluetoothCommandService
+    BluetoothCommandService,
+    ScreenBrightnessService,
+    ScreenOrientationService,
+    MjpegServerService
   )
-  
 
-  val buttons: List<Button> = listOf(IdentifyButton)
-  val switches: List<SwitchEntity> = listOf(BluetoothSwitch)
+
+  val buttons: List<Button> = listOf(IdentifyButton, ScreenWakeButton, ScreenSleepButton)
+  val switches: List<SwitchEntity> = listOf(
+    BluetoothSwitch,
+    KeepScreenOnSwitch,
+    StartAtBootSwitch,
+    BluetoothProxySwitch
+  )
   val all: List<Sensor> = eventSensors + readSensors
-  val toggleables: List<Toggleable> = all + services + buttons + switches
+  val toggleables: List<Toggleable> = all + textSensors + services + buttons + switches
 }

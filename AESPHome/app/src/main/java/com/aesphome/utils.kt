@@ -1,7 +1,9 @@
 package com.aesphome
 
+import android.app.AppOpsManager
 import android.content.Context
 import android.os.Build
+import android.os.Process
 import android.provider.Settings
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -62,6 +64,37 @@ fun getDeviceMac(context: Context): String {
 }
 
 
+
+// Packs a "AA:BB:CC:DD:EE:FF"-style MAC string into the uint64 layout ESPHome's own firmware
+// uses for BluetoothLERawAdvertisement.address (esphome/components/esp32_ble/ble.h,
+// ble_addr_to_uint64: byte 0 in the most-significant position) — matching this exactly is
+// what lets Home Assistant's Bluetooth integration show the right address for a proxied
+// advertisement. Returns null for anything that isn't a well-formed 6-byte MAC.
+fun macStringToLong(mac: String): Long? {
+  val parts = mac.split(":")
+  if (parts.size != 6) return null
+  var result = 0L
+  for (part in parts) {
+    val byte = part.toIntOrNull(16)?.takeIf { it in 0..255 } ?: return null
+    result = (result shl 8) or byte.toLong()
+  }
+  return result
+}
+
+// Usage Access ("PACKAGE_USAGE_STATS") is a special app-op permission with no runtime
+// prompt — this is the standard way to check whether it's actually been granted via its own
+// Settings screen. Shared by ForegroundAppSensor, the app launcher's foreground-app lookup,
+// and the Permissions screen's status row for it.
+fun hasUsageAccess(context: Context): Boolean {
+  val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+  val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    appOps.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName)
+  } else {
+    @Suppress("DEPRECATION")
+    appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName)
+  }
+  return mode == AppOpsManager.MODE_ALLOWED
+}
 
 // Same wlan0-scoped lookup as getDeviceMac, just returning the IPv4 address instead.
 fun getWifiIpAddress(): String? {

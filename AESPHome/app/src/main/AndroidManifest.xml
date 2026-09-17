@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -14,6 +18,35 @@
   <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+  <!-- Bluetooth LE passive scan (proxy): pre-12 needs location to receive scan results at
+       all; 12+ uses the dedicated scan permission instead, marked neverForLocation since
+       this app never uses BLE results to derive location. -->
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+  <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+
+  <!-- Screen brightness / orientation: system-wide control via Settings.System requires this
+       special app-op permission, granted through its own Settings screen (see Permissions). -->
+  <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+
+  <!-- button.screen_wake's short, self-releasing WakeLock. -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+  <!-- text_sensor.foreground_app: another special app-op permission, granted through its own
+       Settings screen — flagged for the linter since it's normally Play-Store-restricted;
+       this app only reads usage stats locally to report the current foreground app, never
+       uploads them anywhere but to the user's own Home Assistant. -->
+  <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+      tools:ignore="ProtectedPermissions" />
+
+  <!-- select.launch_app's picker needs to see launchable apps without the heavily-restricted
+       QUERY_ALL_PACKAGES permission. -->
+  <queries>
+    <intent>
+      <action android:name="android.intent.action.MAIN" />
+      <category android:name="android.intent.category.LAUNCHER" />
+    </intent>
+  </queries>
 
   <application
       android:label="ÆSPHome"
@@ -29,10 +62,20 @@
       </intent-filter>
     </activity>
 
+    <activity
+        android:name=".PermissionsActivity"
+        android:exported="false"
+        android:label="Permissions" />
+
+    <activity
+        android:name=".AppLauncherSettingsActivity"
+        android:exported="false"
+        android:label="Allowed Apps" />
+
     <service
         android:name=".AESPHomeService"
         android:exported="false"
-        android:foregroundServiceType="mediaPlayback" />
+        android:foregroundServiceType="mediaPlayback|camera|microphone|connectedDevice" />
 
     <receiver
         android:name=".BootReceiver"
@@ -40,6 +83,18 @@
       <intent-filter>
         <action android:name="android.intent.action.BOOT_COMPLETED" />
         <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+      </intent-filter>
+    </receiver>
+
+    <receiver
+        android:name=".AESPHomeDeviceAdminReceiver"
+        android:exported="true"
+        android:permission="android.permission.BIND_DEVICE_ADMIN">
+      <meta-data
+          android:name="android.app.device_admin"
+          android:resource="@xml/device_admin_receiver" />
+      <intent-filter>
+        <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
       </intent-filter>
     </receiver>
 
