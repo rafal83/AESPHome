@@ -219,7 +219,8 @@ object Sensors {
     BluetoothCommandService,
     ScreenBrightnessService,
     ScreenOrientationService,
-    MjpegServerService
+    MjpegServerService,
+    AppLauncherService
   )
 
 

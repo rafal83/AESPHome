@@ -140,6 +140,7 @@ class MainActivity : Activity() {
   private val selectSettingSpinners = mutableListOf<Pair<SelectSetting, Spinner>>()
   private var wifiIpText: TextView? = null
   private var haStatusText: TextView? = null
+  private var mjpegStatusText: TextView? = null
 
   // Reposts itself every CONNECTION_INFO_REFRESH_MS so the Wi-Fi/HA lines stay live
   // the whole time this screen is on-screen, not just when it's first opened.
@@ -160,6 +161,7 @@ class MainActivity : Activity() {
     // too rather than assuming the service already did it.
     CameraService.refreshLensOptions(this)
     BluetoothCommandService.refreshOptions(this)
+    AppLauncherService.refreshOptions(this)
 
     val layout = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
@@ -176,12 +178,28 @@ class MainActivity : Activity() {
     layout.addView(wifiIpText)
 
     val haStatusText = TextView(this)
-    haStatusText.setPadding(0, 0, 0, dp(16))
+    haStatusText.setPadding(0, 0, 0, dp(4))
     layout.addView(haStatusText)
+
+    val mjpegStatusText = TextView(this)
+    mjpegStatusText.setPadding(0, 0, 0, dp(16))
+    layout.addView(mjpegStatusText)
 
     this.wifiIpText = wifiIpText
     this.haStatusText = haStatusText
+    this.mjpegStatusText = mjpegStatusText
     refreshConnectionInfo()
+
+    val permissionsButton = Button(this)
+    permissionsButton.text = "Permissions"
+    permissionsButton.setOnClickListener { startActivity(Intent(this, PermissionsActivity::class.java)) }
+    layout.addView(permissionsButton)
+
+    val appLauncherButton = Button(this)
+    appLauncherButton.text = "Allowed Apps (App Launcher)"
+    appLauncherButton.setOnClickListener { startActivity(Intent(this, AppLauncherSettingsActivity::class.java)) }
+    layout.addView(appLauncherButton)
+    layout.addView(divider())
 
     // One group per component: its enable switch immediately followed by that same
     // component's own settings/select-settings, indented underneath it, with a divider
@@ -300,6 +318,12 @@ class MainActivity : Activity() {
       "Home Assistant: $haAddress (${ha.connectedClientName ?: "unknown"})"
     } else {
       "Home Assistant: not connected"
+    }
+
+    mjpegStatusText?.text = if (isEnabled(this, MjpegServerService)) {
+      "MJPEG: ${MjpegServerService.url(this) ?: "starting..."}"
+    } else {
+      ""
     }
   }
 

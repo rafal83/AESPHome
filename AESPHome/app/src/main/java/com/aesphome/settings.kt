@@ -57,6 +57,15 @@ fun setStringFlag(context: Context, key: String, value: String) {
   context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString(key, value).apply()
 }
 
+// Same idea, for a small set of strings — currently only the app launcher's whitelist of
+// allowed package names (sensors/app_launcher.kt).
+fun getStringSetFlag(context: Context, key: String): Set<String> =
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getStringSet(key, emptySet()) ?: emptySet()
+
+fun setStringSetFlag(context: Context, key: String, value: Set<String>) {
+  context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putStringSet(key, value).apply()
+}
+
 // True if this Setting has ever been explicitly persisted (by the device UI, HA, or code).
 // Lets a first-use default be seeded from something other than a fixed compile-time value —
 // e.g. CameraService's JPEG quality, seeded once from the camera's own default — without
