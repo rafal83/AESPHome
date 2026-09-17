@@ -2,6 +2,8 @@
 # ÆSPHome
 <img width="438" height="320" alt="Main Image" src="https://github.com/user-attachments/assets/4022084f-d793-497c-9eac-ec22fc399b92" />
 
+[![Android Build](https://github.com/rafal83/AESPHome/actions/workflows/android-build.yml/badge.svg)](https://github.com/rafal83/AESPHome/actions/workflows/android-build.yml)
+
  
  Android Simulating ESPHome Device for use with Home Assistant
  
@@ -109,8 +111,95 @@ Features
    * WiFi RSSI
      * That thing you leave disabled
 
+---
 
+New Features
+---
 
+| Feature | Android requirement | Home Assistant entity |
+|---|---|---|
+| Screen brightness | "Modify system settings" permission | `number.screen_brightness` |
+| Screen orientation lock | "Modify system settings" permission | `select.screen_orientation` |
+| Wake screen | — (WakeLock) | `button.screen_wake` |
+| Sleep/lock screen | Device Admin (real lock) or none (dim-only fallback) | `button.screen_sleep` |
+| Keep screen on | — (WakeLock) | `switch.keep_screen_on` |
+| Start at boot | `RECEIVE_BOOT_COMPLETED` (already required) | `switch.start_at_boot` |
+| Android/app version, model, IP, Wi-Fi SSID/BSSID, charging source | — | `text_sensor.*` |
+| Foreground app | Usage Access permission | `text_sensor.foreground_app` |
+| Uptime, memory, storage, Wi-Fi frequency/link speed, battery voltage/current/power | — (device-dependent) | `sensor.*` |
+| Proximity, pressure, humidity, ambient temperature, accelerometer/gyroscope/magnetic field (x/y/z) | Matching hardware sensor (entity hidden if absent) | `sensor.*` |
+| App launcher | — (whitelist chosen in-app) | `select.launch_app` |
+| Bluetooth LE proxy (passive scan) | `BLUETOOTH_SCAN` (12+) / location (≤11) | `switch.bluetooth_proxy` |
+| MJPEG camera server | Camera enabled | `binary_sensor.mjpeg_server_running`, `number.mjpeg_port`, `number.mjpeg_max_fps` |
+
+See `AESPHome/docs/IMPLEMENTATION_REPORT.md` for the full entity list and exactly what
+permission each feature needs and why.
+
+### Screen controls
+
+`number.screen_brightness` and `select.screen_orientation` control the device system-wide
+once "Modify system settings" is granted from the in-app **Permissions** screen — without it,
+they only affect this app's own window while it's visible. `button.screen_sleep` performs a
+real screen lock once **Device Admin** is enabled (also from the Permissions screen); without
+it, the button only dims the app's own window and says so in its Home Assistant description.
+
+### Permissions
+
+The app never requests every permission on first launch. Open **Permissions** from the main
+screen to see Granted/Denied/Not-supported for each one an enabled feature needs, with an
+Enable button that opens the right Android settings screen.
+
+### Bluetooth Proxy
+
+Enabling `switch.bluetooth_proxy` makes the device show up to Home Assistant's own Bluetooth
+integration as a passive BLE scanner — the same thing a real ESPHome Bluetooth Proxy does for
+advertisement-only BLE devices (most sensors/trackers). Active GATT connections aren't
+implemented — see `AESPHome/docs/BLUETOOTH_PROXY.md`.
+
+### MJPEG / go2rtc / Frigate
+
+Enabling the MJPEG server (alongside Camera) exposes the same capture feed the ESPHome camera
+entity uses over plain HTTP, for anything that wants a direct feed instead of going through
+Home Assistant:
+
+```
+http://<device-ip>:8080/camera.jpg     # single JPEG
+http://<device-ip>:8080/camera.mjpeg   # multipart/x-mixed-replace stream
+```
+
+The port and max FPS are configurable in-app (`number.mjpeg_port`, `number.mjpeg_max_fps`);
+a per-device token is required by default and shown in the app next to the URL
+(`?token=...`). Disabling the token requirement is in-app only — deliberately not an HA
+entity, so it can't be switched off remotely.
+
+**go2rtc:**
+
+```yaml
+streams:
+  aesphome:
+    - "http://192.168.x.x:8080/camera.mjpeg?token=YOUR_TOKEN"
+```
+
+**Frigate** (via go2rtc):
+
+```yaml
+go2rtc:
+  streams:
+    aesphome:
+      - "http://192.168.x.x:8080/camera.mjpeg?token=YOUR_TOKEN"
+
+cameras:
+  aesphome:
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/aesphome
+          roles:
+            - detect
+```
+
+RTSP itself (the `rtsp://127.0.0.1:8554/aesphome` input above, which go2rtc re-serves from
+the MJPEG source) is not implemented by this app directly — see
+`AESPHome/docs/RTSP_PLAN.md` for the plan if that changes.
 
 ---
 

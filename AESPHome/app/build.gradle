@@ -15,9 +15,31 @@ android {
     versionName "0.0.1"
   }
 
+  // Only configured when a keystore is actually present (release.yml decodes
+  // ANDROID_KEYSTORE_BASE64 to this path when that secret is set) — with no keystore file,
+  // signingConfigs stays empty and assembleRelease falls back to AGP's normal unsigned
+  // output, exactly as it did before this block existed. No secret is ever required for a
+  // debug build, and none of these values are ever logged.
+  def releaseKeystoreFile = file("${rootDir}/release.keystore")
+  def hasReleaseKeystore = releaseKeystoreFile.exists()
+
+  signingConfigs {
+    if (hasReleaseKeystore) {
+      release {
+        storeFile releaseKeystoreFile
+        storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+        keyAlias System.getenv("ANDROID_KEY_ALIAS")
+        keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+      }
+    }
+  }
+
   buildTypes {
     release {
       minifyEnabled false
+      if (hasReleaseKeystore) {
+        signingConfig signingConfigs.release
+      }
     }
   }
 
