@@ -26,8 +26,12 @@ import android.util.Log
     BluetoothLEAdvertisementResponse was removed upstream in ESPHome 2025.8.0, so this only
     ever speaks the raw format).
 
-    Passive scan only (BluetoothProxyFeature.PASSIVE_SCAN) — no GATT connections, pairing, or
-    active-connection proxying. See docs/BLUETOOTH_PROXY.md for what that would take.
+    Also starts/stops BluetoothGattProxy (bluetooth_gatt.kt), which handles the OTHER half of
+    the same feature — HA connecting *through* this device to a remote BLE peripheral (GATT
+    read/write/notify). One switch, one permission set, both capabilities — matching how a
+    real ESPHome bluetooth_proxy component's active_connections option just adds capability
+    to the same proxy rather than being a separate entity. Pairing/cache-clearing/connection-
+    parameter negotiation are NOT implemented — see docs/BLUETOOTH_PROXY.md.
 
 */
 
@@ -83,8 +87,10 @@ object BluetoothProxySwitch : SwitchEntity {
   private fun apply(context: Context, on: Boolean) {
     if (!on) {
       stopScan()
+      BluetoothGattProxy.stop()
       return
     }
+    BluetoothGattProxy.start(context)
     if (!hasScanPermission(context)) {
       Log.e(TAG, "Bluetooth proxy: scan permission not granted")
       return

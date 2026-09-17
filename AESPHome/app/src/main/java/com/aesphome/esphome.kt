@@ -50,6 +50,28 @@ private const val MESSAGE_SUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST = 66
 private const val MESSAGE_UNSUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST = 87
 private const val MESSAGE_BLE_RAW_ADVERTISEMENTS_RESPONSE = 93
 
+// Bluetooth GATT proxy (active connections) — see sensors/bluetooth_gatt.kt
+private const val MESSAGE_BLE_DEVICE_REQUEST = 68
+private const val MESSAGE_BLE_DEVICE_CONNECTION_RESPONSE = 69
+private const val MESSAGE_BLE_GATT_GET_SERVICES_REQUEST = 70
+private const val MESSAGE_BLE_GATT_GET_SERVICES_RESPONSE = 71
+private const val MESSAGE_BLE_GATT_GET_SERVICES_DONE_RESPONSE = 72
+private const val MESSAGE_BLE_GATT_READ_REQUEST = 73
+private const val MESSAGE_BLE_GATT_READ_RESPONSE = 74
+private const val MESSAGE_BLE_GATT_WRITE_REQUEST = 75
+private const val MESSAGE_BLE_GATT_READ_DESCRIPTOR_REQUEST = 76
+private const val MESSAGE_BLE_GATT_WRITE_DESCRIPTOR_REQUEST = 77
+private const val MESSAGE_BLE_GATT_NOTIFY_REQUEST = 78
+private const val MESSAGE_BLE_GATT_NOTIFY_DATA_RESPONSE = 79
+private const val MESSAGE_SUBSCRIBE_BLE_CONNECTIONS_FREE_REQUEST = 80
+private const val MESSAGE_BLE_CONNECTIONS_FREE_RESPONSE = 81
+private const val MESSAGE_BLE_GATT_ERROR_RESPONSE = 82
+private const val MESSAGE_BLE_GATT_WRITE_RESPONSE = 83
+private const val MESSAGE_BLE_GATT_NOTIFY_RESPONSE = 84
+private const val MESSAGE_BLE_DEVICE_PAIRING_RESPONSE = 85
+private const val MESSAGE_BLE_DEVICE_UNPAIRING_RESPONSE = 86
+private const val MESSAGE_BLE_DEVICE_CLEAR_CACHE_RESPONSE = 88
+
 // Shared across every ListEntities*Response (InfoResponseProtoMessage base class):
 // object_id, key, and name are always fields 1, 2, 3, regardless of entity type.
 private const val F_OBJECT_ID = 1
@@ -81,6 +103,7 @@ private const val F_DEVICE_INFO_BLUETOOTH_PROXY_FEATURE_FLAGS = 15
 // ESPHome/aioesphomeapi still speak — the legacy non-raw BluetoothLEAdvertisementResponse
 // was removed upstream in ESPHome 2025.8.0).
 private const val BLUETOOTH_PROXY_FEATURE_PASSIVE_SCAN = 1
+private const val BLUETOOTH_PROXY_FEATURE_ACTIVE_CONNECTIONS = 1 shl 1
 private const val BLUETOOTH_PROXY_FEATURE_RAW_ADVERTISEMENTS = 1 shl 5
 
 // ListEntitiesBinarySensorResponse fields beyond the shared object_id/key/name
@@ -123,6 +146,52 @@ private const val F_BLE_ADV_DATA = 4
 
 // SubscribeBluetoothLEAdvertisementsRequest
 private const val F_SUBSCRIBE_BLE_FLAGS = 1
+
+// BluetoothDeviceRequest (client -> server) / BluetoothDeviceConnectionResponse (server -> client)
+private const val F_BLE_DEV_ADDRESS = 1
+private const val F_BLE_DEV_REQUEST_TYPE = 2
+private const val F_BLE_CONN_CONNECTED = 2
+private const val F_BLE_CONN_MTU = 3
+private const val F_BLE_CONN_ERROR = 4
+
+// BluetoothGATT*Request/Response — address is field 1 and handle is field 2 on every one of
+// these (BluetoothGATTReadRequest, WriteRequest, ReadDescriptorRequest, WriteDescriptorRequest,
+// NotifyRequest, ReadResponse, WriteResponse, NotifyDataResponse, NotifyResponse,
+// ErrorResponse), same "shared base fields" pattern as F_ENTITY_KEY elsewhere in this file.
+private const val F_BLE_GATT_ADDRESS = 1
+private const val F_BLE_GATT_HANDLE = 2
+private const val F_BLE_GATT_WRITE_RESPONSE_WANTED = 3 // WriteRequest's `response` bool
+private const val F_BLE_GATT_WRITE_DATA = 4            // WriteRequest's `data` (ReadDescriptorRequest has none; WriteDescriptorRequest's data is field 3)
+private const val F_BLE_GATT_WRITE_DESC_DATA = 3
+private const val F_BLE_GATT_NOTIFY_ENABLE = 3          // NotifyRequest's `enable` bool
+private const val F_BLE_GATT_READ_DATA = 3              // ReadResponse / NotifyDataResponse `data`
+private const val F_BLE_GATT_ERROR = 3                  // ErrorResponse `error`
+
+// BluetoothGATTGetServicesResponse / *Service / *Characteristic / *Descriptor
+private const val F_BLE_SERVICES_ADDRESS = 1
+private const val F_BLE_SERVICES_LIST = 2
+private const val F_BLE_SVC_UUID = 1
+private const val F_BLE_SVC_HANDLE = 2
+private const val F_BLE_SVC_CHARACTERISTICS = 3
+private const val F_BLE_SVC_SHORT_UUID = 4
+private const val F_BLE_CHAR_UUID = 1
+private const val F_BLE_CHAR_HANDLE = 2
+private const val F_BLE_CHAR_PROPERTIES = 3
+private const val F_BLE_CHAR_DESCRIPTORS = 4
+private const val F_BLE_CHAR_SHORT_UUID = 5
+private const val F_BLE_DESC_UUID = 1
+private const val F_BLE_DESC_HANDLE = 2
+private const val F_BLE_DESC_SHORT_UUID = 3
+
+// BluetoothConnectionsFreeResponse
+private const val F_BLE_CONNFREE_FREE = 1
+private const val F_BLE_CONNFREE_LIMIT = 2
+
+// BluetoothDevicePairingResponse / UnpairingResponse / ClearCacheResponse — address(1) shared,
+// then a bool (paired/success) at field 2 and error at field 3 on every one of them.
+private const val F_BLE_PAIR_ADDRESS = 1
+private const val F_BLE_PAIR_RESULT = 2
+private const val F_BLE_PAIR_ERROR = 3
 
 // ListEntitiesCameraResponse fields beyond the shared object_id/key/name
 private const val F_CAMERA_DISABLED_BY_DEFAULT = 5
@@ -745,7 +814,7 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
             // client shouldn't see a capability this device isn't offering right now.
             if (isEnabled(appContext, BluetoothProxySwitch)) {
               builder.varint(F_DEVICE_INFO_BLUETOOTH_PROXY_FEATURE_FLAGS,
-                BLUETOOTH_PROXY_FEATURE_PASSIVE_SCAN or BLUETOOTH_PROXY_FEATURE_RAW_ADVERTISEMENTS)
+                BLUETOOTH_PROXY_FEATURE_PASSIVE_SCAN or BLUETOOTH_PROXY_FEATURE_RAW_ADVERTISEMENTS or BLUETOOTH_PROXY_FEATURE_ACTIVE_CONNECTIONS)
             }
             send(conn, MESSAGE_DEVICE_INFO_RESPONSE, builder.build())
           }
@@ -986,6 +1055,69 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
             Log.i(TAG, "HA unsubscribed from Bluetooth LE advertisements")
           }
 
+
+          //
+          // Bluetooth GATT proxy (active connections) — every case here just decodes the
+          // request and hands it straight to BluetoothGattProxy (sensors/bluetooth_gatt.kt),
+          // which owns the actual android.bluetooth.BluetoothGatt objects and calls back into
+          // pushBleXxx() below once Android's async GATT callbacks actually complete.
+          //
+          MESSAGE_BLE_DEVICE_REQUEST -> run {
+            val address = findVarintLongField(payload, F_BLE_DEV_ADDRESS) ?: return@run
+            val requestType = decodeFields(payload).fieldOrNull<Int>(F_BLE_DEV_REQUEST_TYPE) ?: 0
+            BluetoothGattProxy.handleDeviceRequest(appContext, address, requestType)
+          }
+
+          MESSAGE_BLE_GATT_GET_SERVICES_REQUEST -> run {
+            val address = findVarintLongField(payload, F_BLE_SERVICES_ADDRESS) ?: return@run
+            BluetoothGattProxy.handleGetServices(address)
+          }
+
+          MESSAGE_BLE_GATT_READ_REQUEST, MESSAGE_BLE_GATT_READ_DESCRIPTOR_REQUEST -> run {
+            val address = findVarintLongField(payload, F_BLE_GATT_ADDRESS) ?: return@run
+            val handle = decodeFields(payload).fieldOrNull<Int>(F_BLE_GATT_HANDLE) ?: return@run
+            BluetoothGattProxy.handleRead(address, handle)
+          }
+
+          MESSAGE_BLE_GATT_WRITE_REQUEST -> run {
+            val address = findVarintLongField(payload, F_BLE_GATT_ADDRESS) ?: return@run
+            val fields = decodeFields(payload)
+            val handle = fields.fieldOrNull<Int>(F_BLE_GATT_HANDLE) ?: return@run
+            val data = fields.fieldOrNull<ByteArray>(F_BLE_GATT_WRITE_DATA) ?: ByteArray(0)
+            val wantsResponse = (fields.fieldOrNull<Int>(F_BLE_GATT_WRITE_RESPONSE_WANTED) ?: 0) != 0
+            BluetoothGattProxy.handleWrite(address, handle, data, wantsResponse)
+          }
+
+          MESSAGE_BLE_GATT_WRITE_DESCRIPTOR_REQUEST -> run {
+            val address = findVarintLongField(payload, F_BLE_GATT_ADDRESS) ?: return@run
+            val fields = decodeFields(payload)
+            val handle = fields.fieldOrNull<Int>(F_BLE_GATT_HANDLE) ?: return@run
+            val data = fields.fieldOrNull<ByteArray>(F_BLE_GATT_WRITE_DESC_DATA) ?: ByteArray(0)
+            BluetoothGattProxy.handleWriteDescriptor(address, handle, data)
+          }
+
+          MESSAGE_BLE_GATT_NOTIFY_REQUEST -> run {
+            val address = findVarintLongField(payload, F_BLE_GATT_ADDRESS) ?: return@run
+            val fields = decodeFields(payload)
+            val handle = fields.fieldOrNull<Int>(F_BLE_GATT_HANDLE) ?: return@run
+            val enable = (fields.fieldOrNull<Int>(F_BLE_GATT_NOTIFY_ENABLE) ?: 0) != 0
+            BluetoothGattProxy.handleNotify(address, handle, enable)
+          }
+
+          //
+          // SubscribeBluetoothConnectionsFreeRequest: report once — this device has no ongoing
+          // "state changed" push for it, unlike real ESPHome hardware's fixed connection-slot
+          // count; free/limit here just reflects BluetoothGattProxy's own soft cap.
+          //
+          MESSAGE_SUBSCRIBE_BLE_CONNECTIONS_FREE_REQUEST -> {
+            val used = BluetoothGattProxy.activeConnectionCount()
+            send(conn, MESSAGE_BLE_CONNECTIONS_FREE_RESPONSE,
+              ProtobufMessageBuilder()
+                .varint(F_BLE_CONNFREE_FREE, (BLE_MAX_CONNECTIONS - used).coerceAtLeast(0))
+                .varint(F_BLE_CONNFREE_LIMIT, BLE_MAX_CONNECTIONS)
+                .build())
+          }
+
         // end when
         }
       }
@@ -994,6 +1126,7 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
     } finally {
       MediaPlayerService.stopPlayback()
       CameraService.stopStreamNow()
+      BluetoothGattProxy.stop() // no client left to read/write/notify through — clean slate on reconnect
       bleSubscribed = false
       activeConn = null
       connectedClientAddress = null
@@ -1029,6 +1162,168 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
     val payload = ProtobufMessageBuilder().bytes(F_BLE_ADVERTISEMENTS, advertisement).build()
     try { send(conn, MESSAGE_BLE_RAW_ADVERTISEMENTS_RESPONSE, payload) }
     catch (e: Exception) { Log.e(TAG, "BLE advertisement push failed: ${e.message}") }
+  }
+
+
+
+  //
+  // Bluetooth GATT proxy (active connections) — BluetoothGattProxy (sensors/bluetooth_gatt.kt)
+  // owns the actual android.bluetooth.BluetoothGatt objects and calls straight into these from
+  // its BluetoothGattCallback (already off the main thread — Android's own Binder callback
+  // thread — so, like pushBleAdvertisement above, no extra Thread is spun up here either).
+  //
+
+  private fun encodeWireUuid(builder: ProtobufMessageBuilder, uuidField: Int, shortUuidField: Int, uuid: WireUuid) {
+    if (uuid.shortUuid != null) {
+      builder.varint(shortUuidField, uuid.shortUuid)
+    } else {
+      // repeated uint64 uuid = 2 (fixed_array_size), high half then low half.
+      builder.varintLong(uuidField, uuid.high)
+      builder.varintLong(uuidField, uuid.low)
+    }
+  }
+
+  private fun buildGattDescriptor(msg: BleGattDescMsg): ByteArray {
+    val builder = ProtobufMessageBuilder()
+    encodeWireUuid(builder, F_BLE_DESC_UUID, F_BLE_DESC_SHORT_UUID, msg.uuid)
+    builder.varint(F_BLE_DESC_HANDLE, msg.handle)
+    return builder.build()
+  }
+
+  private fun buildGattCharacteristic(msg: BleGattCharMsg): ByteArray {
+    val builder = ProtobufMessageBuilder()
+    encodeWireUuid(builder, F_BLE_CHAR_UUID, F_BLE_CHAR_SHORT_UUID, msg.uuid)
+    builder.varint(F_BLE_CHAR_HANDLE, msg.handle)
+    builder.varint(F_BLE_CHAR_PROPERTIES, msg.properties)
+    for (desc in msg.descriptors) builder.bytes(F_BLE_CHAR_DESCRIPTORS, buildGattDescriptor(desc))
+    return builder.build()
+  }
+
+  private fun buildGattService(msg: BleGattServiceMsg): ByteArray {
+    val builder = ProtobufMessageBuilder()
+    encodeWireUuid(builder, F_BLE_SVC_UUID, F_BLE_SVC_SHORT_UUID, msg.uuid)
+    builder.varint(F_BLE_SVC_HANDLE, msg.handle)
+    for (char in msg.characteristics) builder.bytes(F_BLE_SVC_CHARACTERISTICS, buildGattCharacteristic(char))
+    return builder.build()
+  }
+
+  fun pushBleDeviceConnection(address: Long, connected: Boolean, mtu: Int, error: Int) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_DEVICE_CONNECTION_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_DEV_ADDRESS, address)
+        .varint(F_BLE_CONN_CONNECTED, if (connected) 1 else 0)
+        .varint(F_BLE_CONN_MTU, mtu)
+        .varint(F_BLE_CONN_ERROR, error)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE device connection push failed: ${e.message}") }
+  }
+
+  internal fun pushBleServices(address: Long, services: List<BleGattServiceMsg>) {
+    val conn = activeConn ?: return
+    try {
+      for (service in services) {
+        send(conn, MESSAGE_BLE_GATT_GET_SERVICES_RESPONSE, ProtobufMessageBuilder()
+          .varintLong(F_BLE_SERVICES_ADDRESS, address)
+          .bytes(F_BLE_SERVICES_LIST, buildGattService(service))
+          .build())
+      }
+    } catch (e: Exception) { Log.e(TAG, "BLE services push failed: ${e.message}") }
+    pushBleServicesDone(address)
+  }
+
+  fun pushBleServicesDone(address: Long) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_GATT_GET_SERVICES_DONE_RESPONSE,
+        ProtobufMessageBuilder().varintLong(F_BLE_SERVICES_ADDRESS, address).build())
+    } catch (e: Exception) { Log.e(TAG, "BLE services-done push failed: ${e.message}") }
+  }
+
+  fun pushBleGattRead(address: Long, handle: Int, data: ByteArray) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_GATT_READ_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_GATT_ADDRESS, address)
+        .varint(F_BLE_GATT_HANDLE, handle)
+        .bytes(F_BLE_GATT_READ_DATA, data)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE GATT read push failed: ${e.message}") }
+  }
+
+  fun pushBleGattWriteResponse(address: Long, handle: Int) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_GATT_WRITE_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_GATT_ADDRESS, address)
+        .varint(F_BLE_GATT_HANDLE, handle)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE GATT write-response push failed: ${e.message}") }
+  }
+
+  fun pushBleGattNotifyData(address: Long, handle: Int, data: ByteArray) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_GATT_NOTIFY_DATA_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_GATT_ADDRESS, address)
+        .varint(F_BLE_GATT_HANDLE, handle)
+        .bytes(F_BLE_GATT_READ_DATA, data)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE GATT notify-data push failed: ${e.message}") }
+  }
+
+  fun pushBleGattNotifyResponse(address: Long, handle: Int) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_GATT_NOTIFY_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_GATT_ADDRESS, address)
+        .varint(F_BLE_GATT_HANDLE, handle)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE GATT notify-response push failed: ${e.message}") }
+  }
+
+  fun pushBleGattError(address: Long, handle: Int, error: Int) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_GATT_ERROR_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_GATT_ADDRESS, address)
+        .varint(F_BLE_GATT_HANDLE, handle)
+        .varint(F_BLE_GATT_ERROR, error)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE GATT error push failed: ${e.message}") }
+  }
+
+  fun pushBlePairingResponse(address: Long, paired: Boolean, error: Int) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_DEVICE_PAIRING_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_PAIR_ADDRESS, address)
+        .varint(F_BLE_PAIR_RESULT, if (paired) 1 else 0)
+        .varint(F_BLE_PAIR_ERROR, error)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE pairing-response push failed: ${e.message}") }
+  }
+
+  fun pushBleUnpairingResponse(address: Long, success: Boolean, error: Int) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_DEVICE_UNPAIRING_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_PAIR_ADDRESS, address)
+        .varint(F_BLE_PAIR_RESULT, if (success) 1 else 0)
+        .varint(F_BLE_PAIR_ERROR, error)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE unpairing-response push failed: ${e.message}") }
+  }
+
+  fun pushBleClearCacheResponse(address: Long, success: Boolean, error: Int) {
+    val conn = activeConn ?: return
+    try {
+      send(conn, MESSAGE_BLE_DEVICE_CLEAR_CACHE_RESPONSE, ProtobufMessageBuilder()
+        .varintLong(F_BLE_PAIR_ADDRESS, address)
+        .varint(F_BLE_PAIR_RESULT, if (success) 1 else 0)
+        .varint(F_BLE_PAIR_ERROR, error)
+        .build())
+    } catch (e: Exception) { Log.e(TAG, "BLE clear-cache-response push failed: ${e.message}") }
   }
 
 

@@ -68,6 +68,33 @@ class ProtobufTest {
   }
 
   @Test
+  fun `findVarintLongField decodes a 64-bit value decodeFields would truncate`() {
+    // The Bluetooth GATT proxy's request messages (BluetoothDeviceRequest etc.) carry a
+    // uint64 address field that regularly exceeds 32 bits — decodeFields' Int accumulator
+    // can't represent that; findVarintLongField exists specifically to decode it correctly.
+    val address = macStringToLong("AA:BB:CC:DD:EE:FF")!!
+    val payload = ProtobufMessageBuilder().varintLong(1, address).varint(2, 7).build()
+    assertEquals(address, findVarintLongField(payload, 1))
+    assertEquals(7, decodeFields(payload)[2])
+  }
+
+  @Test
+  fun `findVarintLongField finds the field regardless of position in the message`() {
+    val payload = ProtobufMessageBuilder()
+        .string(5, "irrelevant")
+        .varintLong(1, 0xAABBCCDDEEFFL)
+        .bytes(9, byteArrayOf(1, 2, 3))
+        .build()
+    assertEquals(0xAABBCCDDEEFFL, findVarintLongField(payload, 1))
+  }
+
+  @Test
+  fun `findVarintLongField returns null for an absent field`() {
+    val payload = ProtobufMessageBuilder().varint(2, 1).build()
+    assertEquals(null, findVarintLongField(payload, 1))
+  }
+
+  @Test
   fun `varintLong round-trips a 48-bit MAC-derived value`() {
     val address = macStringToLong("AA:BB:CC:DD:EE:FF")!!
     val payload = ProtobufMessageBuilder().varintLong(1, address).build()

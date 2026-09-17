@@ -227,6 +227,42 @@ fun decodeVarint(nextByte: () -> Int): Int {
 
 
 
+// Same tag-length-value walk as decodeFields below, but decodes ONE specific field as a full
+// 64-bit Long rather than decodeFields' 32-bit Int — needed for fields declared `uint64` in
+// api.proto (e.g. the Bluetooth GATT proxy's `address`, a MAC-derived value that routinely
+// exceeds 32 bits) where decodeFields' Int accumulator would silently truncate it. Scans the
+// whole payload rather than stopping at the first match, so field order in the message
+// doesn't matter. Returns null if the field is absent, isn't a varint, or the payload is
+// malformed.
+fun findVarintLongField(payload: ByteArray, fieldNumber: Int): Long? {
+  var index = 0
+  var result: Long? = null
+  while (index < payload.size) {
+    val tag = decodeVarint { payload[index++].toInt() }
+    val fNum = tag shr 3
+    when (tag and 7) {
+      0 -> {
+        var value = 0L
+        var shift = 0
+        while (true) {
+          val byte = payload[index++].toInt() and 0xFF
+          value = value or ((byte.toLong() and 0x7F) shl shift)
+          if (byte and 0x80 == 0) break
+          shift += 7
+        }
+        if (fNum == fieldNumber) result = value
+      }
+      5 -> index += 4
+      2 -> {
+        val length = decodeVarint { payload[index++].toInt() }
+        index += length
+      }
+      else -> return result
+    }
+  }
+  return result
+}
+
 // Decodes a payload into {field_number: value}. Varints come back as Int, everything else as ByteArray.
 fun decodeFields(payload: ByteArray): Map<Int, Any> {
   val fields = HashMap<Int, Any>()
