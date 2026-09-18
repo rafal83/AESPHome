@@ -4,10 +4,12 @@ import android.app.Activity
 import android.content.pm.LauncherApps
 import android.os.Bundle
 import android.os.Process
-import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.checkbox.MaterialCheckBox
+import com.google.android.material.divider.MaterialDivider
 
 
 /*
@@ -26,6 +28,7 @@ class AppLauncherSettingsActivity : Activity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    actionBar?.setDisplayHomeAsUpEnabled(true)
 
     val layout = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
@@ -34,7 +37,8 @@ class AppLauncherSettingsActivity : Activity() {
 
     layout.addView(TextView(this).apply {
       text = "Apps checked here can be launched from Home Assistant via select.launch_app."
-      setPadding(0, 0, 0, dp(16))
+      textSize = 13f
+      setPadding(0, 0, 0, dp(12))
     })
 
     // LauncherApps (not PackageManager.queryIntentActivities) — the API real launcher apps
@@ -49,17 +53,41 @@ class AppLauncherSettingsActivity : Activity() {
 
     val allowed = AppLauncherService.allowedPackages(this).toMutableSet()
 
-    for ((packageName, label) in apps) {
-      val checkBox = CheckBox(this)
+    val listLayout = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dp(16), dp(8), dp(16), dp(8))
+    }
+    for ((index, app) in apps.withIndex()) {
+      val (packageName, label) = app
+      if (index != 0) listLayout.addView(MaterialDivider(this).apply {
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+          topMargin = dp(4); bottomMargin = dp(4)
+        }
+      })
+
+      val checkBox = MaterialCheckBox(this)
       checkBox.text = label
       checkBox.isChecked = packageName in allowed
       checkBox.setOnCheckedChangeListener { _, checked ->
         if (checked) allowed.add(packageName) else allowed.remove(packageName)
         AppLauncherService.setAllowedPackages(this, allowed)
       }
-      layout.addView(checkBox)
+      listLayout.addView(checkBox)
     }
 
+    layout.addView(MaterialCardView(this).apply {
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
+      radius = dp(12).toFloat()
+      cardElevation = dp(1).toFloat()
+      useCompatPadding = true
+      addView(listLayout)
+    })
+
     setContentView(ScrollView(this).apply { addView(layout) })
+  }
+
+  override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
+    if (item.itemId == android.R.id.home) { finish(); return true }
+    return super.onOptionsItemSelected(item)
   }
 }

@@ -22,16 +22,21 @@ import android.text.InputType
 import android.util.Log
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
-import android.widget.Switch
 import android.widget.TextView
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.divider.MaterialDivider
+import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 
 const val TAG = "AESPHome"
 private const val CONNECTION_INFO_REFRESH_MS = 2000L
@@ -170,58 +175,79 @@ class MainActivity : Activity() {
 
     val statusText = TextView(this)
     statusText.text = "ÆSPHome is running in the background."
-    statusText.setPadding(0, 0, 0, dp(16))
+    statusText.textSize = 15f
+    statusText.setPadding(0, 0, 0, dp(12))
     layout.addView(statusText)
 
     val wifiIpText = TextView(this)
-    wifiIpText.setPadding(0, 0, 0, dp(4))
-    layout.addView(wifiIpText)
-
     val haStatusText = TextView(this)
-    haStatusText.setPadding(0, 0, 0, dp(4))
-    layout.addView(haStatusText)
-
     val mjpegStatusText = TextView(this)
-    mjpegStatusText.setPadding(0, 0, 0, dp(16))
-    layout.addView(mjpegStatusText)
+    val infoCard = card().apply {
+      addView(LinearLayout(this@MainActivity).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(16), dp(16), dp(16))
+        addView(wifiIpText.apply { setPadding(0, 0, 0, dp(4)) })
+        addView(haStatusText.apply { setPadding(0, 0, 0, dp(4)) })
+        addView(mjpegStatusText)
+      })
+    }
+    layout.addView(infoCard)
 
     this.wifiIpText = wifiIpText
     this.haStatusText = haStatusText
     this.mjpegStatusText = mjpegStatusText
     refreshConnectionInfo()
 
-    val permissionsButton = Button(this)
-    permissionsButton.text = "Permissions"
-    permissionsButton.setOnClickListener { startActivity(Intent(this, PermissionsActivity::class.java)) }
+    val permissionsButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+      text = "Permissions"
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        topMargin = dp(12)
+      }
+      setOnClickListener { startActivity(Intent(this@MainActivity, PermissionsActivity::class.java)) }
+    }
     layout.addView(permissionsButton)
 
-    val appLauncherButton = Button(this)
-    appLauncherButton.text = "Allowed Apps (App Launcher)"
-    appLauncherButton.setOnClickListener { startActivity(Intent(this, AppLauncherSettingsActivity::class.java)) }
+    val appLauncherButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+      text = "Allowed Apps (App Launcher)"
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        topMargin = dp(8)
+      }
+      setOnClickListener { startActivity(Intent(this@MainActivity, AppLauncherSettingsActivity::class.java)) }
+    }
     layout.addView(appLauncherButton)
-    layout.addView(divider())
 
     // Grouped by UiSection (Sensor.kt) instead of one flat alphabetical list of 70+ rows —
-    // within each section, components are still sorted alphabetically by label and rendered
-    // exactly as before (its enable switch immediately followed by that component's own
-    // settings/select-settings, indented underneath it). Still built entirely from registry
-    // metadata: a new Sensor/Service/Setting needs no changes here to show up correctly
-    // grouped, as long as its id is mapped in Sensor.kt's UI_SECTION_BY_ID (anything missing
-    // there falls back to "Other" rather than being dropped).
+    // each section renders as its own MaterialCardView. Within each section, components are
+    // still sorted alphabetically by label and rendered exactly as before (its enable switch
+    // immediately followed by that component's own settings/select-settings, indented
+    // underneath it). Still built entirely from registry metadata: a new Sensor/Service/
+    // Setting needs no changes here to show up correctly grouped, as long as its id is mapped
+    // in Sensor.kt's UI_SECTION_BY_ID (anything missing there falls back to "Other" rather
+    // than being dropped).
     val sections = Sensors.toggleables.groupBy { it.uiSection }
     val orderedSections = UiSection.entries.filter { sections.containsKey(it) }
-    for ((sectionIndex, section) in orderedSections.withIndex()) {
-      layout.addView(TextView(this).apply {
+    for (section in orderedSections) {
+      val sectionLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(16), dp(16), dp(16))
+      }
+      sectionLayout.addView(TextView(this).apply {
         text = section.label
         textSize = 16f
         setTypeface(typeface, android.graphics.Typeface.BOLD)
-        setPadding(0, if (sectionIndex == 0) 0 else dp(4), 0, dp(8))
+        setPadding(0, 0, 0, dp(4))
       })
 
       val groups = sections.getValue(section).sortedBy { it.label }
       for ((index, component) in groups.withIndex()) {
-        val switch = Switch(this)
-        switch.text = "${component.label}"
+        if (index != 0) sectionLayout.addView(MaterialDivider(this).apply {
+          layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(8); bottomMargin = dp(8)
+          }
+        })
+
+        val switch = MaterialSwitch(this)
+        switch.text = component.label
         switch.isChecked = isEnabled(this, component)
 
         val header = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -234,13 +260,13 @@ class MainActivity : Activity() {
             setPadding(dp(4), 0, 0, 0)
           })
         }
-        layout.addView(header)
+        sectionLayout.addView(header)
 
         val childRows = component.settings.filter { it.deviceUi }.map { settingRow(it) } +
                         component.selectSettings.filter { it.deviceUi }.map { selectSettingRow(it) }
         // Hidden rather than greyed out while the toggle is off — its settings don't do
         // anything until it's back on, so there's nothing useful to show in the meantime.
-        childRows.forEach { layout.addView(it); it.visibility = if (switch.isChecked) View.VISIBLE else View.GONE }
+        childRows.forEach { sectionLayout.addView(it); it.visibility = if (switch.isChecked) View.VISIBLE else View.GONE }
 
         switch.setOnCheckedChangeListener { _, checked ->
           setEnabled(this, component, checked)
@@ -249,47 +275,47 @@ class MainActivity : Activity() {
           }
           childRows.forEach { it.visibility = if (checked) View.VISIBLE else View.GONE }
         }
-
-        if (index != groups.lastIndex) layout.addView(divider())
       }
 
-      layout.addView(sectionDivider())
+      layout.addView(card().apply { addView(sectionLayout) })
     }
 
     // Entity-affecting changes (toggles, lens/resolution picks, etc.) only take effect in
     // HA once it reconnects and re-enumerates entities. Left as an explicit action rather
     // than firing on every change, so several changes can be made before paying for it.
-    val refreshButton = Button(this)
-    refreshButton.text = "Refresh Changes / Force Reconnect"
-    refreshButton.layoutParams = LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(8) }
-    refreshButton.setOnClickListener {
-      // Both device lists (paired Bluetooth devices, camera lenses) can change while
-      // the app is running, so re-gather them here rather than only at start()/launch
-      // — otherwise this button would just re-send the same stale options.
-      for ((component, refresh) in listOf<Pair<Toggleable, () -> Unit>>(
-        BluetoothCommandService to { BluetoothCommandService.refreshOptions(applicationContext) },
-        CameraService to { CameraService.refreshLensOptions(applicationContext) },
-      )) {
-        if (isEnabled(applicationContext, component)) refresh()
+    val refreshButton = MaterialButton(this).apply {
+      text = "Refresh Changes / Force Reconnect"
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        topMargin = dp(16)
       }
-      AESPHomeService.instance?.requestDisconnect()
+      setOnClickListener {
+        // Both device lists (paired Bluetooth devices, camera lenses) can change while
+        // the app is running, so re-gather them here rather than only at start()/launch
+        // — otherwise this button would just re-send the same stale options.
+        for ((component, refresh) in listOf<Pair<Toggleable, () -> Unit>>(
+          BluetoothCommandService to { BluetoothCommandService.refreshOptions(applicationContext) },
+          CameraService to { CameraService.refreshLensOptions(applicationContext) },
+        )) {
+          if (isEnabled(applicationContext, component)) refresh()
+        }
+        AESPHomeService.instance?.requestDisconnect()
+      }
     }
     layout.addView(refreshButton)
 
-    val shutdownButton = Button(this)
-    shutdownButton.text = "Shutdown ÆSPHome"
-    shutdownButton.layoutParams = LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(8) }
-    shutdownButton.setOnClickListener {
-      AlertDialog.Builder(this)
-        .setTitle("Shutdown ÆSPHome?")
-        .setMessage("This disconnects Home Assistant and stops all background monitoring until you reopen the app.")
-        .setPositiveButton("Shutdown") { _, _ -> shutdown() }
-        .setNegativeButton("Cancel", null)
-        .show()
+    val shutdownButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+      text = "Shutdown ÆSPHome"
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        topMargin = dp(8)
+      }
+      setOnClickListener {
+        AlertDialog.Builder(this@MainActivity)
+          .setTitle("Shutdown ÆSPHome?")
+          .setMessage("This disconnects Home Assistant and stops all background monitoring until you reopen the app.")
+          .setPositiveButton("Shutdown") { _, _ -> shutdown() }
+          .setNegativeButton("Cancel", null)
+          .show()
+      }
     }
     layout.addView(shutdownButton)
 
@@ -317,6 +343,18 @@ class MainActivity : Activity() {
 
   private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
+  // A rounded, elevated container used for the connection-info panel and each UiSection —
+  // replaces the old flat LinearLayout + manually-drawn divider lines with the platform's
+  // standard "grouped settings" look.
+  private fun card(): MaterialCardView = MaterialCardView(this).apply {
+    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+      topMargin = dp(12)
+    }
+    radius = dp(12).toFloat()
+    cardElevation = dp(1).toFloat()
+    useCompatPadding = true
+  }
+
   // Shows this device's own Wi-Fi IP, and — if Home Assistant is currently connected —
   // its IP and the client name it reported at handshake (e.g. "Home Assistant 2024.8.0").
   private fun refreshConnectionInfo() {
@@ -335,39 +373,19 @@ class MainActivity : Activity() {
     mjpegStatusText?.text = listOfNotNull(mjpegLine, rtspLine).joinToString("\n")
   }
 
-  // A thin line separating one component's group from the next, within a section.
-  private fun divider(): View = View(this).apply {
-    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
-      topMargin = dp(12)
-      bottomMargin = dp(12)
-    }
-    setBackgroundColor(Color.LTGRAY)
-  }
-
-  // A heavier line separating one UiSection from the next — visually distinct from the
-  // thin inter-component divider() above, so a section boundary reads differently from a
-  // boundary between two components in the same section.
-  private fun sectionDivider(): View = View(this).apply {
-    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(2)).apply {
-      topMargin = dp(4)
-      bottomMargin = dp(16)
-    }
-    setBackgroundColor(Color.DKGRAY)
-  }
-
-  // One indented label + numeric input for a Setting, wired to persist on commit and
+  // One indented floating-label numeric field for a Setting, wired to persist on commit and
   // push the new value to HA.
   private fun settingRow(setting: Setting): View {
     val row = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
-      setPadding(dp(32), dp(4), 0, dp(4))
+      setPadding(dp(32), dp(8), 0, 0)
     }
 
-    val label = TextView(this)
-    label.text = setting.label
-    row.addView(label)
-
-    val input = EditText(this)
+    val inputLayout = TextInputLayout(this).apply {
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+      hint = setting.label
+    }
+    val input = TextInputEditText(inputLayout.context)
     input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
     input.imeOptions = EditorInfo.IME_ACTION_DONE
     input.setText(getSetting(this, setting).toString())
@@ -388,7 +406,8 @@ class MainActivity : Activity() {
     }
     input.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commit() }
 
-    row.addView(input)
+    inputLayout.addView(input)
+    row.addView(inputLayout)
     settingInputs.add(setting to input)
     return row
   }
