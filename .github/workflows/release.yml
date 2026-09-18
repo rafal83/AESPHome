@@ -110,7 +110,7 @@ jobs:
             exit 0
           fi
           echo "Using $apksigner_bin"
-          "$apksigner_bin" verify --print-certs "${{ steps.apk.outputs.path }}"
+          "$apksigner_bin" verify --print-certs "artifact/${{ steps.apk.outputs.name }}"
 
       - name: Compute SHA-256 checksum
         run: |
