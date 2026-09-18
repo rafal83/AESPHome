@@ -248,3 +248,56 @@ object Sensors {
   val all: List<Sensor> = eventSensors + readSensors
   val toggleables: List<Toggleable> = all + textSensors + services + buttons + switches
 }
+
+// Which group of the settings screen a Toggleable's row belongs to (MainActivity.kt) — purely
+// a UI grouping, no effect on HA. Kept as one central id->section map here rather than a
+// property on every Toggleable (which would mean touching 25+ files to add or move one entry)
+// so the whole grouping is visible and reviewable in a single place. An id missing from this
+// map falls back to OTHER instead of failing to compile or crashing — safe by construction,
+// so a newly-added entity that's forgotten here just shows up in "Other" rather than breaking
+// the screen.
+enum class UiSection(val label: String) {
+  SCREEN("Screen"),
+  CAMERA("Camera & Streaming"),
+  BLUETOOTH("Bluetooth"),
+  MEDIA("Media"),
+  SENSORS("Sensors"),
+  DIAGNOSTICS("Diagnostics"),
+  APP_CONTROL("App Control"),
+  OTHER("Other"),
+}
+
+// internal (not private) so a unit test can check its coverage directly, without needing to
+// construct Sensors.toggleables — which, unlike this map, pulls in real Android objects
+// (e.g. TouchSensor's Handler(Looper.getMainLooper())) that a plain JVM test can't load.
+internal val UI_SECTION_BY_ID: Map<String, UiSection> = buildMap {
+  for (id in listOf("screen_on", "screen_brightness", "screen_orientation", "screen_wake",
+      "screen_sleep", "keep_screen_on", "touch")) put(id, UiSection.SCREEN)
+
+  for (id in listOf("camera", "camera_lux", "mjpeg_server", "mjpeg_server_running", "mjpeg_url",
+      "rtsp_server", "rtsp_server_running", "rtsp_url",
+      "person_detector", "person_detected", "person_count")) put(id, UiSection.CAMERA)
+
+  for (id in listOf("bluetooth_switch", "bluetooth_commands", "bluetooth_proxy")) put(id, UiSection.BLUETOOTH)
+
+  for (id in listOf("media_player", "system_volume")) put(id, UiSection.MEDIA)
+
+  for (id in listOf("battery_percent", "battery_charging", "battery_temperature_c",
+      "device_movement", "device_orientation", "light_sensor", "decibel_meter",
+      "proximity", "pressure", "relative_humidity", "ambient_temperature", "wifi_rssi",
+      "accelerometer_x", "accelerometer_y", "accelerometer_z",
+      "gyroscope_x", "gyroscope_y", "gyroscope_z",
+      "magnetic_field_x", "magnetic_field_y", "magnetic_field_z")) put(id, UiSection.SENSORS)
+
+  for (id in listOf("android_version", "device_model", "app_version", "ip_address",
+      "wifi_ssid", "wifi_bssid", "charging_source", "foreground_app", "uptime",
+      "free_memory", "total_memory", "free_storage", "total_storage",
+      "wifi_frequency", "wifi_link_speed",
+      "battery_voltage", "battery_current", "battery_power")) put(id, UiSection.DIAGNOSTICS)
+
+  for (id in listOf("mdns", "identify", "start_at_boot", "app_launcher", "auto_update",
+      "update_available", "latest_available_version",
+      "check_for_update", "install_update")) put(id, UiSection.APP_CONTROL)
+}
+
+val Toggleable.uiSection: UiSection get() = UI_SECTION_BY_ID[id] ?: UiSection.OTHER

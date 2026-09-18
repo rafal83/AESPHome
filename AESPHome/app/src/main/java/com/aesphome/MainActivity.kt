@@ -201,50 +201,60 @@ class MainActivity : Activity() {
     layout.addView(appLauncherButton)
     layout.addView(divider())
 
-    // One group per component: its enable switch immediately followed by that same
-    // component's own settings/select-settings, indented underneath it, with a divider
-    // before the next group — so it's obvious at a glance which options belong to which
-    // toggle, instead of three unrelated flat lists. Sorted alphabetically by label so
-    // the order doesn't depend on registration order in Sensors. Still built entirely
-    // from registry metadata: a new Sensor/Service/Setting needs no changes here to show
-    // up correctly grouped.
-    val groups = Sensors.toggleables.sortedBy { it.label }
-    for ((index, component) in groups.withIndex()) {
-      val switch = Switch(this)
-      //switch.text = "Enable ${component.label}"
-      switch.text = "${component.label}"
-      switch.isChecked = isEnabled(this, component)
+    // Grouped by UiSection (Sensor.kt) instead of one flat alphabetical list of 70+ rows —
+    // within each section, components are still sorted alphabetically by label and rendered
+    // exactly as before (its enable switch immediately followed by that component's own
+    // settings/select-settings, indented underneath it). Still built entirely from registry
+    // metadata: a new Sensor/Service/Setting needs no changes here to show up correctly
+    // grouped, as long as its id is mapped in Sensor.kt's UI_SECTION_BY_ID (anything missing
+    // there falls back to "Other" rather than being dropped).
+    val sections = Sensors.toggleables.groupBy { it.uiSection }
+    val orderedSections = UiSection.entries.filter { sections.containsKey(it) }
+    for ((sectionIndex, section) in orderedSections.withIndex()) {
+      layout.addView(TextView(this).apply {
+        text = section.label
+        textSize = 16f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setPadding(0, if (sectionIndex == 0) 0 else dp(4), 0, dp(8))
+      })
 
-      val header = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-      header.addView(switch)
-      if (component.description.isNotEmpty()) {
-        header.addView(TextView(this).apply {
-          text = component.description
-          textSize = 12f
-          setTextColor(Color.GRAY)
-          setPadding(dp(4), 0, 0, 0)
-        })
-      }
-      layout.addView(header)
+      val groups = sections.getValue(section).sortedBy { it.label }
+      for ((index, component) in groups.withIndex()) {
+        val switch = Switch(this)
+        switch.text = "${component.label}"
+        switch.isChecked = isEnabled(this, component)
 
-      val childRows = component.settings.filter { it.deviceUi }.map { settingRow(it) } +
-                      component.selectSettings.filter { it.deviceUi }.map { selectSettingRow(it) }
-      // Hidden rather than greyed out while the toggle is off — its settings don't do
-      // anything until it's back on, so there's nothing useful to show in the meantime.
-      childRows.forEach { layout.addView(it); it.visibility = if (switch.isChecked) View.VISIBLE else View.GONE }
-
-      switch.setOnCheckedChangeListener { _, checked ->
-        setEnabled(this, component, checked)
-        if (component is Startable) {
-          if (checked) component.start(applicationContext) else component.stop(applicationContext)
+        val header = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        header.addView(switch)
+        if (component.description.isNotEmpty()) {
+          header.addView(TextView(this).apply {
+            text = component.description
+            textSize = 12f
+            setTextColor(Color.GRAY)
+            setPadding(dp(4), 0, 0, 0)
+          })
         }
-        childRows.forEach { it.visibility = if (checked) View.VISIBLE else View.GONE }
+        layout.addView(header)
+
+        val childRows = component.settings.filter { it.deviceUi }.map { settingRow(it) } +
+                        component.selectSettings.filter { it.deviceUi }.map { selectSettingRow(it) }
+        // Hidden rather than greyed out while the toggle is off — its settings don't do
+        // anything until it's back on, so there's nothing useful to show in the meantime.
+        childRows.forEach { layout.addView(it); it.visibility = if (switch.isChecked) View.VISIBLE else View.GONE }
+
+        switch.setOnCheckedChangeListener { _, checked ->
+          setEnabled(this, component, checked)
+          if (component is Startable) {
+            if (checked) component.start(applicationContext) else component.stop(applicationContext)
+          }
+          childRows.forEach { it.visibility = if (checked) View.VISIBLE else View.GONE }
+        }
+
+        if (index != groups.lastIndex) layout.addView(divider())
       }
 
-      if (index != groups.lastIndex) layout.addView(divider())
+      layout.addView(sectionDivider())
     }
-
-    layout.addView(divider())
 
     // Entity-affecting changes (toggles, lens/resolution picks, etc.) only take effect in
     // HA once it reconnects and re-enumerates entities. Left as an explicit action rather
@@ -325,13 +335,24 @@ class MainActivity : Activity() {
     mjpegStatusText?.text = listOfNotNull(mjpegLine, rtspLine).joinToString("\n")
   }
 
-  // A thin line separating one component's group from the next.
+  // A thin line separating one component's group from the next, within a section.
   private fun divider(): View = View(this).apply {
     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
       topMargin = dp(12)
       bottomMargin = dp(12)
     }
     setBackgroundColor(Color.LTGRAY)
+  }
+
+  // A heavier line separating one UiSection from the next — visually distinct from the
+  // thin inter-component divider() above, so a section boundary reads differently from a
+  // boundary between two components in the same section.
+  private fun sectionDivider(): View = View(this).apply {
+    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(2)).apply {
+      topMargin = dp(4)
+      bottomMargin = dp(16)
+    }
+    setBackgroundColor(Color.DKGRAY)
   }
 
   // One indented label + numeric input for a Setting, wired to persist on commit and

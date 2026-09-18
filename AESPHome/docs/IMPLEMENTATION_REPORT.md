@@ -223,6 +223,18 @@ requested automatically.
   check still compiles and behaves correctly on `minSdk` 22 — it simply never matches on
   older OSes, which is correct (no such source exists there).
 
+# Settings screen reorganization (v0.2.3)
+
+`MainActivity` previously listed all 70+ `Toggleable`s alphabetically in one flat list — not
+scalable once the branch's feature count grew this much. Added `UiSection` (`sensors/Sensor.kt`):
+an enum (Screen, Camera & Streaming, Bluetooth, Media, Sensors, Diagnostics, App Control,
+Other) plus one central `id -> UiSection` map, rather than a property on every `Toggleable`
+(which would mean touching 25+ files to add or move one entry). An id missing from the map
+falls back to `Other` instead of failing to compile — `UiSectionTest.kt` pins down that every
+currently-registered id is actually mapped, so nothing silently lands in the fallback.
+`MainActivity` now renders one bold header + a heavier divider per section, sorted internally
+by label exactly as before.
+
 # Post-release fixes from real-device testing (v0.2.2)
 
 v0.2.1 was the first build actually installed on a device. It surfaced four issues, all
@@ -273,12 +285,6 @@ fixed here:
   rather than hand-rolling the cryptography, and land it as its own change with its own
   focused review.
 - **Foreground service type live updates** — see the Android version limitations note above.
-- **UI polish**: the spec's proposed section grouping (Screen/Camera/Bluetooth/Sensors/
-  Android/Permissions/Diagnostics) is only partially reflected — `MainActivity` still lists
-  every `Toggleable` alphabetically in one flat list (its existing, working layout), plus new
-  buttons to the Permissions and Allowed-Apps screens. Reorganizing the whole settings screen
-  into named sections was judged lower-value than the features themselves within this pass's
-  scope, given the existing screen already groups each entity with its own settings.
 
 # Build
 
