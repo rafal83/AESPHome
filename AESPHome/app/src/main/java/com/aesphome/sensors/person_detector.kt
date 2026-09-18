@@ -50,7 +50,7 @@ object PersonDetectorService : Service {
 
   val intervalSetting = Setting(
       id = "person_detector_interval", label = "Person Detection Interval (s)",
-      default = 5f, min = 2f, max = 300f, step = 1f,
+      default = 5f, min = 1f, max = 300f, step = 1f,
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
       enabledByDefaultHa = false, icon = "mdi:timer-outline")
 
