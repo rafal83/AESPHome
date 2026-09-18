@@ -10,6 +10,8 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -34,10 +36,20 @@ import java.util.concurrent.ConcurrentHashMap
     incrementing integer handle per characteristic/descriptor and keeps a local map — real
     ATT handles are never exposed to or needed by the client.
 
-    GATT operation queueing: Android silently drops a second read/write/descriptor operation
-    issued on the same BluetoothGatt before the previous one's callback has fired — so every
-    operation for a given connection goes through a simple FIFO queue, one in flight at a
-    time, advanced from each operation's own callback.
+    GATT operation queueing + timeout: Android silently drops a second read/write/descriptor
+    operation issued on the same BluetoothGatt before the previous one's callback has fired,
+    so every operation for a given connection goes through GattOpQueue (gatt_op_queue.kt) —
+    one in flight at a time, advanced from each operation's own callback. Critically, Android
+    can also accept an operation and then never call its callback at all; GattOpQueue's
+    per-op timeout (GATT_OP_TIMEOUT_MS) is what keeps that from blocking the queue forever,
+    and its stale-token check is what stops a very-late callback for a timed-out op from being
+    mistaken for completing whatever op is current by the time it finally arrives.
+
+    MTU: requestMtu(517) is attempted right after connecting, through the same queue/timeout
+    as everything else — success, failure, no callback at all, and a peripheral that doesn't
+    support requestMtu() all fall back to the default 23-byte ATT MTU rather than blocking or
+    failing the connection. BluetoothDeviceConnectionResponse is sent only once this settles
+    (not immediately on raw connect), carrying whatever MTU was actually negotiated.
 
 */
 
@@ -45,6 +57,13 @@ import java.util.concurrent.ConcurrentHashMap
 // keeps BluetoothConnectionsFreeResponse (esphome.kt) meaningful. Shared (not file-private)
 // since esphome.kt's SubscribeBluetoothConnectionsFreeRequest handler reports against it too.
 internal const val BLE_MAX_CONNECTIONS = 3
+
+// Default ATT MTU per the Bluetooth Core Spec, before any negotiation — what a connection
+// reports if requestMtu() never succeeds. 517 is the largest ESPHome/aioesphomeapi itself
+// ever requests (23 + a 4-byte ATT header rounds to the practical max most stacks allow).
+private const val DEFAULT_ATT_MTU = 23
+private const val REQUESTED_MTU = 517
+internal const val GATT_OP_TIMEOUT_MS = 10_000L
 
 // BluetoothDeviceRequestType (api.proto)
 private const val REQUEST_TYPE_CONNECT = 0
@@ -56,10 +75,17 @@ private const val REQUEST_TYPE_CONNECT_V3_WITHOUT_CACHE = 5
 private const val REQUEST_TYPE_CLEAR_CACHE = 6
 
 private const val GATT_ERROR_NOT_CONNECTED = 129 // matches ESPHome's own GATT_NOT_CONNECTED-ish "not connected" convention: a value outside the real 0-255 ATT error space callers can recognize as synthetic
+private const val GATT_ERROR_TIMEOUT = 130        // synthetic, same convention: this device's own op timeout, not a real ATT status Android ever returned
 
 object BluetoothGattProxy {
 
-  private class GattOp(val run: () -> Unit)
+  // Fixed sentinel tokens for the two per-connection ops that have no natural Android object
+  // to match a callback against (unlike a characteristic/descriptor read/write, which use
+  // the characteristic/descriptor instance itself as the token).
+  private object MtuToken
+  private object DiscoverServicesToken
+
+  private val timeoutHandler = Handler(Looper.getMainLooper())
 
   private class Connection(val device: BluetoothDevice) {
     var gatt: BluetoothGatt? = null
@@ -68,6 +94,16 @@ object BluetoothGattProxy {
     val serviceHandle = HashMap<BluetoothGattService, Int>()
     var nextHandle = 1
     var servicesSent = false
+
+    // Set once requestMtu() actually succeeds (onMtuChanged with GATT_SUCCESS); stays at the
+    // BLE-spec default otherwise (failure, timeout, no callback, unsupported peripheral).
+    @Volatile var negotiatedMtu = DEFAULT_ATT_MTU
+
+    val opQueue = GattOpQueue(
+        timeoutMs = GATT_OP_TIMEOUT_MS,
+        schedule = { runnable -> timeoutHandler.postDelayed(runnable, GATT_OP_TIMEOUT_MS); runnable },
+        cancel = { handle -> timeoutHandler.removeCallbacks(handle as Runnable) },
+    )
 
     // Looks up this object's previously-assigned handle, or assigns and remembers a new one
     // — the single source of truth both the first GetServicesResponse and any later re-request
@@ -79,25 +115,6 @@ object BluetoothGattProxy {
     fun handleFor(descriptor: BluetoothGattDescriptor): Int =
         descByHandle.entries.firstOrNull { it.value == descriptor }?.key
             ?: (nextHandle++).also { descByHandle[it] = descriptor }
-
-    private val opQueue = ArrayDeque<GattOp>()
-    @Volatile private var opInFlight = false
-
-    @Synchronized fun enqueue(op: () -> Unit) {
-      opQueue.addLast(GattOp(op))
-      if (!opInFlight) runNext()
-    }
-
-    @Synchronized fun completeOp() {
-      opInFlight = false
-      runNext()
-    }
-
-    private fun runNext() {
-      val next = opQueue.removeFirstOrNull() ?: return
-      opInFlight = true
-      next.run()
-    }
   }
 
   private val connections = ConcurrentHashMap<Long, Connection>() // keyed by macStringToLong(device.address)
@@ -106,7 +123,10 @@ object BluetoothGattProxy {
   fun start(context: Context) { appContext = context }
 
   fun stop() {
-    for (conn in connections.values) try { conn.gatt?.close() } catch (e: Exception) {}
+    for (conn in connections.values) {
+      conn.opQueue.cancelAll()
+      try { conn.gatt?.close() } catch (e: Exception) {}
+    }
     connections.clear()
   }
 
@@ -134,12 +154,12 @@ object BluetoothGattProxy {
   private fun connect(context: Context, address: Long) {
     if (connections.containsKey(address)) return // already connected/connecting
     if (!hasConnectPermission(context)) {
-      Log.e(TAG, "GATT connect: BLUETOOTH_CONNECT not granted")
+      Log.e("$TAG/BLE", "GATT connect: BLUETOOTH_CONNECT not granted")
       AESPHomeService.instance?.pushBleDeviceConnection(address, connected = false, mtu = 0, error = -1)
       return
     }
     if (connections.size >= BLE_MAX_CONNECTIONS) {
-      Log.e(TAG, "GATT connect: at BLE_MAX_CONNECTIONS ($BLE_MAX_CONNECTIONS)")
+      Log.e("$TAG/BLE", "GATT connect: at BLE_MAX_CONNECTIONS ($BLE_MAX_CONNECTIONS)")
       AESPHomeService.instance?.pushBleDeviceConnection(address, connected = false, mtu = 0, error = -1)
       return
     }
@@ -151,7 +171,7 @@ object BluetoothGattProxy {
     try {
       conn.gatt = device.connectGatt(context, false, callback(address), BluetoothDevice.TRANSPORT_LE)
     } catch (e: SecurityException) {
-      Log.e(TAG, "GATT connect denied", e)
+      Log.e("$TAG/BLE", "GATT connect denied", e)
       connections.remove(address)
       AESPHomeService.instance?.pushBleDeviceConnection(address, connected = false, mtu = 0, error = -1)
     }
@@ -162,23 +182,64 @@ object BluetoothGattProxy {
     try { conn.gatt?.disconnect() } catch (e: SecurityException) {}
   }
 
+  // Runs once MTU negotiation has settled one way or another (success, failure, timeout, or
+  // an exception from requestMtu() itself) — reports the connection to HA with whatever MTU
+  // actually applies, then kicks off service discovery through the same queue.
+  private fun finishConnect(conn: Connection, address: Long, gatt: BluetoothGatt) {
+    AESPHomeService.instance?.pushBleDeviceConnection(address, connected = true, mtu = conn.negotiatedMtu, error = 0)
+    conn.opQueue.enqueue(DiscoverServicesToken, onTimeout = {
+      Log.w("$TAG/BLE", "Service discovery timed out for $address")
+      AESPHomeService.instance?.pushBleServicesDone(address)
+    }) {
+      try {
+        gatt.discoverServices()
+      } catch (e: SecurityException) {
+        conn.opQueue.complete(DiscoverServicesToken)
+        AESPHomeService.instance?.pushBleServicesDone(address)
+      }
+    }
+  }
+
   // ==================== GATT callback ====================
 
   private fun callback(address: Long) = object : BluetoothGattCallback() {
 
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
       if (newState == BluetoothProfile.STATE_CONNECTED) {
-        AESPHomeService.instance?.pushBleDeviceConnection(address, connected = true, mtu = 23, error = 0)
-        try { gatt.discoverServices() } catch (e: SecurityException) {}
+        val conn = connections[address] ?: return
+        conn.opQueue.enqueue(MtuToken, onTimeout = {
+          Log.w("$TAG/BLE", "MTU negotiation timed out for $address — continuing at default MTU")
+          finishConnect(conn, address, gatt)
+        }) {
+          val requested = try { gatt.requestMtu(REQUESTED_MTU) } catch (e: Exception) { false }
+          if (!requested) {
+            // No callback will ever come for a request that was refused/threw outright —
+            // complete this op ourselves instead of waiting out the full timeout for nothing.
+            Log.w("$TAG/BLE", "requestMtu() rejected for $address — continuing at default MTU")
+            conn.opQueue.complete(MtuToken)
+            finishConnect(conn, address, gatt)
+          }
+        }
       } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
         AESPHomeService.instance?.pushBleDeviceConnection(address, connected = false, mtu = 0, error = if (status != 0) status else 0)
+        val conn = connections[address]
+        conn?.opQueue?.cancelAll() // nothing further should be reported for a connection that's gone
         try { gatt.close() } catch (e: Exception) {}
         connections.remove(address)
       }
     }
 
+    override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+      val conn = connections[address] ?: return
+      if (status == BluetoothGatt.GATT_SUCCESS) conn.negotiatedMtu = mtu
+      // false: a callback for an MTU request that already timed out and was superseded by
+      // finishConnect()'s own fallback — ignore it, finishConnect() already ran once.
+      if (conn.opQueue.complete(MtuToken)) finishConnect(conn, address, gatt)
+    }
+
     override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
       val conn = connections[address] ?: return
+      if (!conn.opQueue.complete(DiscoverServicesToken)) return // stale — already timed out
       if (status != BluetoothGatt.GATT_SUCCESS) {
         AESPHomeService.instance?.pushBleServicesDone(address)
         return
@@ -189,23 +250,19 @@ object BluetoothGattProxy {
     }
 
     override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
-      val conn = connections[address]
-      val handle = conn?.charByHandle?.entries?.firstOrNull { it.value == characteristic }?.key
-      if (handle != null) {
-        if (status == BluetoothGatt.GATT_SUCCESS) AESPHomeService.instance?.pushBleGattRead(address, handle, value)
-        else AESPHomeService.instance?.pushBleGattError(address, handle, status)
-      }
-      conn?.completeOp()
+      val conn = connections[address] ?: return
+      if (!conn.opQueue.complete(characteristic)) return // stale — already timed out and reported
+      val handle = conn.charByHandle.entries.firstOrNull { it.value == characteristic }?.key ?: return
+      if (status == BluetoothGatt.GATT_SUCCESS) AESPHomeService.instance?.pushBleGattRead(address, handle, value)
+      else AESPHomeService.instance?.pushBleGattError(address, handle, status)
     }
 
     override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-      val conn = connections[address]
-      val handle = conn?.charByHandle?.entries?.firstOrNull { it.value == characteristic }?.key
-      if (handle != null) {
-        if (status == BluetoothGatt.GATT_SUCCESS) AESPHomeService.instance?.pushBleGattWriteResponse(address, handle)
-        else AESPHomeService.instance?.pushBleGattError(address, handle, status)
-      }
-      conn?.completeOp()
+      val conn = connections[address] ?: return
+      if (!conn.opQueue.complete(characteristic)) return
+      val handle = conn.charByHandle.entries.firstOrNull { it.value == characteristic }?.key ?: return
+      if (status == BluetoothGatt.GATT_SUCCESS) AESPHomeService.instance?.pushBleGattWriteResponse(address, handle)
+      else AESPHomeService.instance?.pushBleGattError(address, handle, status)
     }
 
     override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
@@ -215,36 +272,32 @@ object BluetoothGattProxy {
     }
 
     override fun onDescriptorRead(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int, value: ByteArray) {
-      val conn = connections[address]
-      val handle = conn?.descByHandle?.entries?.firstOrNull { it.value == descriptor }?.key
-      if (handle != null) {
-        if (status == BluetoothGatt.GATT_SUCCESS) AESPHomeService.instance?.pushBleGattRead(address, handle, value)
-        else AESPHomeService.instance?.pushBleGattError(address, handle, status)
-      }
-      conn?.completeOp()
+      val conn = connections[address] ?: return
+      if (!conn.opQueue.complete(descriptor)) return
+      val handle = conn.descByHandle.entries.firstOrNull { it.value == descriptor }?.key ?: return
+      if (status == BluetoothGatt.GATT_SUCCESS) AESPHomeService.instance?.pushBleGattRead(address, handle, value)
+      else AESPHomeService.instance?.pushBleGattError(address, handle, status)
     }
 
     override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-      val conn = connections[address]
+      val conn = connections[address] ?: return
+      if (!conn.opQueue.complete(descriptor)) return
       // The CCCD write descriptor's write is how notify enable/disable (below) completes —
       // it's routed back as a NotifyResponse, not a plain descriptor WriteResponse, so HA's
       // "enable notifications" call resolves; a write aimed at any OTHER descriptor still
       // reports as a normal GATT write response.
-      val pendingNotifyHandle = conn?.charByHandle?.entries
-          ?.firstOrNull { it.value.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID) === descriptor }?.key
+      val pendingNotifyHandle = conn.charByHandle.entries
+          .firstOrNull { it.value.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID) === descriptor }?.key
       if (descriptor.uuid == CLIENT_CHARACTERISTIC_CONFIG_UUID && pendingNotifyHandle != null) {
         AESPHomeService.instance?.pushBleGattNotifyResponse(address, pendingNotifyHandle)
       } else {
-        val handle = conn?.descByHandle?.entries?.firstOrNull { it.value == descriptor }?.key
+        val handle = conn.descByHandle.entries.firstOrNull { it.value == descriptor }?.key
         if (handle != null) {
           if (status == BluetoothGatt.GATT_SUCCESS) AESPHomeService.instance?.pushBleGattWriteResponse(address, handle)
           else AESPHomeService.instance?.pushBleGattError(address, handle, status)
         }
       }
-      conn?.completeOp()
     }
-
-    override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {}
   }
 
   // ==================== GATT service tree encoding ====================
@@ -281,11 +334,21 @@ object BluetoothGattProxy {
     val conn = connections[address] ?: run { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED); return }
     val gatt = conn.gatt ?: return
     conn.charByHandle[handle]?.let { char ->
-      conn.enqueue { try { gatt.readCharacteristic(char) } catch (e: SecurityException) { conn.completeOp() } }
+      conn.opQueue.enqueue(char, onTimeout = { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_TIMEOUT) }) {
+        try { gatt.readCharacteristic(char) } catch (e: SecurityException) {
+          conn.opQueue.complete(char)
+          AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED)
+        }
+      }
       return
     }
     conn.descByHandle[handle]?.let { desc ->
-      conn.enqueue { try { gatt.readDescriptor(desc) } catch (e: SecurityException) { conn.completeOp() } }
+      conn.opQueue.enqueue(desc, onTimeout = { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_TIMEOUT) }) {
+        try { gatt.readDescriptor(desc) } catch (e: SecurityException) {
+          conn.opQueue.complete(desc)
+          AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED)
+        }
+      }
       return
     }
     AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED)
@@ -295,7 +358,7 @@ object BluetoothGattProxy {
     val conn = connections[address] ?: run { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED); return }
     val gatt = conn.gatt ?: return
     val char = conn.charByHandle[handle] ?: run { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED); return }
-    conn.enqueue {
+    conn.opQueue.enqueue(char, onTimeout = { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_TIMEOUT) }) {
       try {
         val writeType = if (expectResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -308,8 +371,11 @@ object BluetoothGattProxy {
           @Suppress("DEPRECATION")
           gatt.writeCharacteristic(char)
         }
-        if (!expectResponse) conn.completeOp() // no-response writes never get onCharacteristicWrite
-      } catch (e: SecurityException) { conn.completeOp() }
+        if (!expectResponse) conn.opQueue.complete(char) // no-response writes never get onCharacteristicWrite
+      } catch (e: SecurityException) {
+        conn.opQueue.complete(char)
+        AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED)
+      }
     }
   }
 
@@ -317,7 +383,7 @@ object BluetoothGattProxy {
     val conn = connections[address] ?: run { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED); return }
     val gatt = conn.gatt ?: return
     val desc = conn.descByHandle[handle] ?: run { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED); return }
-    conn.enqueue {
+    conn.opQueue.enqueue(desc, onTimeout = { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_TIMEOUT) }) {
       try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
           gatt.writeDescriptor(desc, data)
@@ -327,7 +393,10 @@ object BluetoothGattProxy {
           @Suppress("DEPRECATION")
           gatt.writeDescriptor(desc)
         }
-      } catch (e: SecurityException) { conn.completeOp() }
+      } catch (e: SecurityException) {
+        conn.opQueue.complete(desc)
+        AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED)
+      }
     }
   }
 
@@ -336,10 +405,15 @@ object BluetoothGattProxy {
     val gatt = conn.gatt ?: return
     val char = conn.charByHandle[handle] ?: run { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED); return }
     val cccd = char.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)
-    conn.enqueue {
+    if (cccd == null) {
+      // No CCCD — nothing more to write, best-effort enable only; matches this codebase's
+      // prior behavior of sending no response at all in this case (not changed here).
+      try { gatt.setCharacteristicNotification(char, enable) } catch (e: SecurityException) {}
+      return
+    }
+    conn.opQueue.enqueue(cccd, onTimeout = { AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_TIMEOUT) }) {
       try {
         gatt.setCharacteristicNotification(char, enable)
-        if (cccd == null) { conn.completeOp(); return@enqueue } // no CCCD — nothing more to write, best-effort enable only
         val indicate = (char.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
         val value = when {
           !enable -> BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
@@ -354,7 +428,10 @@ object BluetoothGattProxy {
           @Suppress("DEPRECATION")
           gatt.writeDescriptor(cccd)
         }
-      } catch (e: SecurityException) { conn.completeOp() }
+      } catch (e: SecurityException) {
+        conn.opQueue.complete(cccd)
+        AESPHomeService.instance?.pushBleGattError(address, handle, GATT_ERROR_NOT_CONNECTED)
+      }
     }
   }
 }
