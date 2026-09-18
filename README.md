@@ -169,7 +169,3 @@ downloading, not the final install step.
 The app never requests every permission on first launch. Open **Permissions** from the main
 screen to see Granted/Denied/Not-supported for each one an enabled feature needs, with an
 Enable button that opens the right Android settings screen.
-
----
-
-<img width="343" height="1901" alt="Controls, Sensors, Configuration" src="https://github.com/user-attachments/assets/45da6d1e-fec6-4c83-a9d9-fb3774731fc0" />
