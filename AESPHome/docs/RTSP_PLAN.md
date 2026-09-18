@@ -1,5 +1,25 @@
 # H.264 / RTSP
 
+## Status: implemented, three real-device bugs found and fixed (v0.2.2 - v0.2.5)
+
+Real-device testing kept reporting the stream starting and then dying a few seconds later,
+deterministically, across two separate fix attempts:
+
+- **v0.2.4**: theorized as a write-hang — Java's `Socket` has no write-timeout, so a slow/stuck
+  client could block a write on the shared encoder-drain thread forever. Fixed by giving each
+  session its own bounded queue and dedicated writer thread. This did **not** resolve the
+  reported symptom.
+- **v0.2.5** (the actual root cause): the RTSP control-response writes (from the socket's
+  read/handle thread) and the RTP data writes (from the per-session writer thread added in
+  v0.2.4) both wrote to the same `Socket`'s `OutputStream` with no lock between them — and the
+  `PLAY` handler set `playing = true` *before* sending `PLAY`'s own response. That let the
+  writer thread send binary interleaved RTP bytes to the client before the client had even
+  received `RTSP/1.0 200 OK` for `PLAY`, permanently desyncing the client's interleaved-frame
+  parser at exactly the point `PLAY` completes — matching the reported "works for a few seconds
+  then dies" symptom exactly. Fixed with a `socketWriteLock` shared by every write to the
+  session's socket, and by reordering `PLAY` to send its response before flipping
+  `playing = true`.
+
 ## Status: implemented, one real-device bug found and fixed (v0.2.2)
 
 Real-device testing (v0.2.1) reported RTSP not working while MJPEG worked fine on the same
@@ -52,9 +72,11 @@ format vs. this file's RTP packetization.
 ## Implemented
 
 - `switch`-free — `Service` `rtsp_server`, `number.rtsp_port` (default 8554),
-  `number.rtsp_bitrate_kbps` (default 1500), `select.rtsp_resolution` (640x480/1280x720, no
-  finer control — kept simple rather than exposing every MediaCodec knob),
-  `binary_sensor.rtsp_server_running`, `text_sensor.rtsp_url`.
+  `number.rtsp_bitrate_kbps` (default 1500), `binary_sensor.rtsp_server_running`,
+  `text_sensor.rtsp_url`. No separate resolution setting — the stream always uses whatever
+  resolution is currently selected for the camera (`CameraService.selectedResolution()`),
+  since streaming at a different resolution than the camera's own capture pipeline was found
+  to be confusing in practice, not a useful degree of freedom.
 - Camera2 → `MediaCodec` (`video/avc`, `COLOR_FormatSurface` input, hardware encoder when the
   device has one, 15fps, 2s I-frame interval) — a dedicated capture session separate from
   `CameraService`'s JPEG pipeline (see `rtsp_server.kt`'s file header for why sharing one

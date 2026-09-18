@@ -38,6 +38,22 @@ Why isn't the MAC address reported the actual MAC of the device?
 ---
 Android being Android. Can't reliably get the WiFi MAC address, so a MAC-shaped hex of the dynamically generated Android ID is used instead.
 
+How do I get zero-tap silent updates?
+---
+By default, installing an update still needs one tap on Android's own "Install" confirmation
+screen — Android requires that unless the app is **Device Owner**, a device-management
+privilege with no in-app grant flow (it can only be set from adb, and only on a device with no
+Google account already signed in / no other Device Owner already set):
+
+```
+adb shell dpm set-device-owner com.aesphome/.AESPHomeDeviceAdminReceiver
+```
+
+Once set, the **Permissions** screen shows "Device Owner (silent updates)" as Granted, and
+`update.aesphome_firmware`'s Install action from Home Assistant installs with no tap at all.
+This is a device-wide, mostly-irreversible commitment (removing it again generally means a
+factory reset) — only worth it for a device dedicated entirely to running this app.
+
 How can I help?
 ---
 Use it, enjoy it, make bug reports, make suggestions for improvements or open a PR and add improvements.

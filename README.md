@@ -58,7 +58,7 @@ a BLE peripheral's characteristics). Pairing and cache-clearing aren't implement
 | Lens / rotation / resolution / effect / JPEG quality / idle update rate | — | `select`/`number` per option |
 | Illuminance from the camera or light sensor | Camera or light sensor | `sensor.lux_*` |
 | MJPEG HTTP server | Camera enabled | `binary_sensor.mjpeg_server_running`, `number.mjpeg_port`, `number.mjpeg_max_fps`, `text_sensor.mjpeg_url` |
-| RTSP / H.264 server ⚠️ | Camera permission | `binary_sensor.rtsp_server_running`, `number.rtsp_port`, `number.rtsp_bitrate_kbps`, `select.rtsp_resolution`, `text_sensor.rtsp_url` |
+| RTSP / H.264 server ⚠️ | Camera permission | `binary_sensor.rtsp_server_running`, `number.rtsp_port`, `number.rtsp_bitrate_kbps`, `text_sensor.rtsp_url` |
 | Person detection (on-device TFLite) | Camera enabled | `binary_sensor.person_detected`, `sensor.person_count` |
 
 Enabling the MJPEG server (alongside Camera) exposes the same capture feed the ESPHome camera
@@ -100,9 +100,10 @@ cameras:
 ```
 
 A direct `rtsp://<device-ip>:8554/aesphome` H.264 stream is also implemented (Camera2 →
-MediaCodec → RTP-over-TCP) — see `AESPHome/docs/RTSP_PLAN.md`. It has had less real-world
-testing than everything else in this list; if a stream won't play, that doc's troubleshooting
-section is the place to start.
+MediaCodec → RTP-over-TCP, always at the camera's own selected resolution — there's no
+separate RTSP resolution setting) — see `AESPHome/docs/RTSP_PLAN.md`. It has had less
+real-world testing than everything else in this list; if a stream won't play, that doc's
+troubleshooting section is the place to start.
 
 Person detection runs a small on-device model (EfficientDet-Lite0, bundled, CPU-only,
 ~4.3MB) against the camera feed — no image or video data leaves the device. It's a genuinely
@@ -141,9 +142,10 @@ it, the button only dims the app's own window and says so in its Home Assistant 
 `select.launch_app` can only launch a package you've explicitly allowed on the **Allowed
 Apps** screen — there's no way to launch an arbitrary app from the network. With **Auto
 Update Check** enabled, the app periodically compares its own version against the latest
-release on `github.com/rafal83/AESPHome`. Installing still needs one tap on Android's own
-confirmation screen — there's no way around that without root, so this automates checking and
-downloading, not the final install step.
+release on `github.com/rafal83/AESPHome` and Home Assistant offers a real Install action on
+`update.aesphome_firmware`, same as any other ESPHome device. Installing still needs one tap
+on Android's own confirmation screen — unless the app has also been made **Device Owner**
+(see the [FAQ](FAQ.md)), in which case the update installs with zero taps.
 
 ### Sensors
 

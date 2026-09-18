@@ -261,6 +261,39 @@ by label exactly as before.
   server-side bug — not changed, since there's nothing on this server's side to change about
   another program's transport-negotiation default.
 
+# RTSP socket write race, Device Owner silent updates, Material redesign (v0.2.5 - v0.2.6)
+
+- **RTSP: fixed the actual root cause of the "plays for a few seconds then dies" bug** that
+  survived v0.2.4's writer-thread fix. Root cause: the `PLAY` handler flipped `playing = true`
+  *before* sending `PLAY`'s own response, and RTSP control-response writes (from the socket's
+  read/handle thread) shared no lock with RTP data writes (from the per-session writer thread).
+  The writer thread could therefore send binary interleaved RTP bytes to the client before it
+  had even received `RTSP/1.0 200 OK` for `PLAY`, permanently desyncing the client's
+  interleaved-frame parser right at the point `PLAY` completes — deterministic, and matching
+  the reported symptom exactly. Fixed with a `socketWriteLock` (`RtspSession`) shared by every
+  write to that session's socket (`respond()`, `respondWithBody()`, `respondError()`,
+  `writeRawRtp()`), and by reordering `PLAY` to send its response before flipping
+  `playing = true`. See `docs/RTSP_PLAN.md` for the full writeup.
+- **Device Owner silent updates**: `AutoUpdateService.downloadAndInstall()` now checks
+  `isDeviceOwner()` (`utils.kt`) and, when true, commits the downloaded APK through a
+  `PackageInstaller.Session` with `setRequireUserAction(USER_ACTION_NOT_REQUIRED)` (API 31+) —
+  a zero-tap install, handled by the new `AESPHomeUpdateInstallReceiver`. Device Owner has no
+  in-app grant flow (it's an adb-only, largely irreversible device commitment); the Permissions
+  screen shows its status as informational only, pointing to `FAQ.md` for the `adb shell dpm
+  set-device-owner` command. Without it, the existing tap-to-confirm `ACTION_VIEW` install flow
+  is unchanged.
+- **Material Components UI redesign**: `Theme.AESPHome` (`Theme.Material3.DayNight` +
+  `colors.xml`) replaces the default platform theme; `PermissionsActivity`, `MainActivity`, and
+  `AppLauncherSettingsActivity` were rewritten with `MaterialButton`, `MaterialSwitch`,
+  `MaterialCardView` (one per `UiSection` in `MainActivity`, replacing the old manually-drawn
+  section dividers), `MaterialDivider`, `MaterialCheckBox`, and `TextInputLayout` +
+  `TextInputEditText` (floating-label numeric settings, replacing bare `EditText`). Pinned to
+  `com.google.android.material:material:1.12.0` rather than the current 1.14.0, since 1.13+
+  pulls in an `androidx.core` version that requires `compileSdk` 35 / AGP 8.6+ — a separate,
+  larger change not made in this pass. `SelectSetting`s still use the plain `Spinner` (it
+  already re-skins correctly under `Theme.Material3.DayNight`) rather than an exposed dropdown
+  menu, to keep this pass low-risk.
+
 # Post-release fixes from real-device testing (v0.2.2)
 
 v0.2.1 was the first build actually installed on a device. It surfaced four issues, all
