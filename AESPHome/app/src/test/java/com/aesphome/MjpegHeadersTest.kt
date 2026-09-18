@@ -1,6 +1,7 @@
 package com.aesphome
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -47,5 +48,14 @@ class MjpegHeadersTest {
   fun `default boundary matches between stream and chunk headers`() {
     val declaredBoundary = multipartStreamHeader().substringAfter("boundary=").substringBefore("\r\n")
     assertTrue(multipartChunkHeader(1).startsWith("--$declaredBoundary"))
+  }
+
+  @Test
+  fun `tokenMatches accepts the exact expected token and nothing else`() {
+    assertTrue(tokenMatches("abc123", "abc123"))
+    assertFalse(tokenMatches("abc124", "abc123"))
+    assertFalse(tokenMatches("abc12", "abc123")) // shorter
+    assertFalse(tokenMatches("abc1234", "abc123")) // longer
+    assertFalse(tokenMatches(null, "abc123")) // no token provided at all (neither query nor Bearer header)
   }
 }

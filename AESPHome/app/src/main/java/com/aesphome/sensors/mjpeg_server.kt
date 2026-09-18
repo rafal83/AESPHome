@@ -12,6 +12,10 @@ import java.net.Socket
 import java.nio.charset.Charset
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 
@@ -41,6 +45,18 @@ private const val BOUNDARY = "aesphomeframe"
 private const val STREAM_KEEPALIVE_MS = 2000L // comfortably under CAMERA_STREAM_TIMEOUT_MS
 private const val SINGLE_SHOT_WAIT_MS = 4000L
 
+// Bounds total concurrent connections (single-shot and streaming together) — previously one
+// unbounded Thread() per accepted socket, so enough simultaneous/stuck clients (e.g. several
+// browser tabs left open, or a viewer that stopped reading without closing) could grow
+// threads without limit. A write can still block indefinitely on a stuck client's full TCP
+// send buffer (java.net.Socket has no write-timeout, same underlying limitation the RTSP
+// server had — see docs/RTSP_PLAN.md's v0.2.5 writeup); bounding the pool caps the resulting
+// damage to "at most this many stuck clients" instead of unbounded thread growth, rather
+// than eliminating the possibility outright (a per-client writer-thread/queue like RTSP's
+// would, but MJPEG's every-client-already-has-its-own-thread design makes that a much
+// smaller blast radius than RTSP's original single-shared-thread bug was).
+private const val MAX_CONCURRENT_CLIENTS = 8
+
 // Pure header builders, kept separate from the socket I/O around them so they're unit-
 // testable without a live connection (see MjpegServerHeadersTest).
 internal fun httpStatusHeader(code: Int, text: String): String =
@@ -54,6 +70,11 @@ internal fun multipartStreamHeader(boundary: String = BOUNDARY): String =
 
 internal fun multipartChunkHeader(contentLength: Int, boundary: String = BOUNDARY): String =
     "--$boundary\r\nContent-Type: image/jpeg\r\nContent-Length: $contentLength\r\n\r\n"
+
+// Constant-time comparison (java.security.MessageDigest.isEqual, not String.equals/!=) so a
+// client can't use response-timing differences to guess the token one byte at a time.
+internal fun tokenMatches(provided: String?, expected: String): Boolean =
+    provided != null && java.security.MessageDigest.isEqual(provided.toByteArray(), expected.toByteArray())
 
 object MjpegServerService : Service {
   override val id                  = "mjpeg_server"
@@ -85,7 +106,8 @@ object MjpegServerService : Service {
 
   @Volatile private var serverSocket: ServerSocket? = null
   @Volatile private var running = false
-  private val clientCount = AtomicInteger(0)
+  @Volatile private var clientExecutor: ThreadPoolExecutor? = null
+  private val clientCount = AtomicInteger(0) // active MJPEG *stream* viewers (serveStream only)
 
   fun token(context: Context): String {
     val existing = getStringFlag(context, "mjpeg_token", "")
@@ -104,6 +126,13 @@ object MjpegServerService : Service {
 
   override fun start(context: Context) {
     running = true
+    // No queueing (SynchronousQueue): a client beyond MAX_CONCURRENT_CLIENTS is rejected
+    // immediately (503) rather than piling up accepted-but-unserved sockets — a queued
+    // socket would still hold a file descriptor open indefinitely if the queue never drains
+    // (which it wouldn't, for streaming connections that only end when the viewer leaves).
+    clientExecutor = ThreadPoolExecutor(
+        MAX_CONCURRENT_CLIENTS, MAX_CONCURRENT_CLIENTS, 0L, TimeUnit.MILLISECONDS, SynchronousQueue(),
+    )
     Thread({ acceptLoop(context) }, "AESPHomeMjpegServer").start()
   }
 
@@ -111,13 +140,19 @@ object MjpegServerService : Service {
     running = false
     try { serverSocket?.close() } catch (e: IOException) {}
     serverSocket = null
+    // shutdownNow(), not shutdown(): a stuck streaming client's thread could otherwise
+    // never finish on its own (see MAX_CONCURRENT_CLIENTS's doc comment) and block this
+    // from ever completing. In-flight requests already check `running` every loop
+    // iteration and exit within STREAM_KEEPALIVE_MS-ish either way.
+    clientExecutor?.shutdownNow()
+    clientExecutor = null
     MjpegServerRunningSensor.updateState(false)
   }
 
   private fun acceptLoop(context: Context) {
     val wifiIp = getWifiIpAddress()
     if (wifiIp == null) {
-      Log.e(TAG, "MJPEG server: no Wi-Fi IP yet, not starting")
+      Log.e("$TAG/MJPEG", "no Wi-Fi IP yet, not starting")
       return
     }
     val port = getSetting(context, portSetting).toInt()
@@ -127,13 +162,19 @@ object MjpegServerService : Service {
       server.bind(InetSocketAddress(InetAddress.getByName(wifiIp), port))
       serverSocket = server
       MjpegServerRunningSensor.updateState(true)
-      Log.i(TAG, "MJPEG server listening on $wifiIp:$port")
+      Log.i("$TAG/MJPEG", "listening on $wifiIp:$port")
       while (running) {
         val socket = try { server.accept() } catch (e: IOException) { break } // server.close() on stop() lands here
-        Thread({ handleConnection(context, socket) }, "AESPHomeMjpegClient").start()
+        try {
+          clientExecutor?.execute { handleConnection(context, socket) } ?: run { socket.close() }
+        } catch (e: RejectedExecutionException) {
+          Log.w("$TAG/MJPEG", "at MAX_CONCURRENT_CLIENTS ($MAX_CONCURRENT_CLIENTS) — rejecting new connection")
+          try { writeStatus(socket, 503, "Service Unavailable") } catch (e2: IOException) {}
+          try { socket.close() } catch (e2: IOException) {}
+        }
       }
     } catch (e: IOException) {
-      Log.e(TAG, "MJPEG server failed to bind: ${e.message}")
+      Log.e("$TAG/MJPEG", "failed to bind: ${e.message}")
     } finally {
       MjpegServerRunningSensor.updateState(false)
     }
@@ -144,16 +185,28 @@ object MjpegServerService : Service {
       socket.soTimeout = 10_000
       val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charset.forName("ISO-8859-1")))
       val requestLine = reader.readLine() ?: return
-      while (true) { val line = reader.readLine(); if (line.isNullOrEmpty()) break } // drain headers, unused
+      var bearerToken: String? = null
+      while (true) {
+        val line = reader.readLine() ?: break
+        if (line.isEmpty()) break
+        // Only header this server actually reads — everything else is drained, unused.
+        // Lets a client authenticate via `Authorization: Bearer <token>` as an alternative
+        // to the URL query token, for anything that'd rather not put a secret in a URL
+        // (go2rtc/Frigate are configured with the URL form; this is for anything else).
+        if (line.startsWith("Authorization:", ignoreCase = true)) {
+          bearerToken = line.substringAfter(":").trim().removePrefix("Bearer ").trim().ifEmpty { null }
+        }
+      }
 
       val parts = requestLine.split(" ")
       if (parts.size < 2) return
       val target = parts[1]
       val path = target.substringBefore("?")
       val query = target.substringAfter("?", "")
-      val token = query.split("&").firstOrNull { it.startsWith("token=") }?.removePrefix("token=")
+      val queryToken = query.split("&").firstOrNull { it.startsWith("token=") }?.removePrefix("token=")
+      val providedToken = queryToken ?: bearerToken
 
-      if (getSelectSetting(context, authSetting) == "Enabled" && token != token(context)) {
+      if (getSelectSetting(context, authSetting) == "Enabled" && !tokenMatches(providedToken, token(context))) {
         writeStatus(socket, 401, "Unauthorized")
         return
       }
@@ -200,7 +253,13 @@ object MjpegServerService : Service {
     val queue = ArrayBlockingQueue<ByteArray>(1)
     val listener: (ByteArray) -> Unit = { if (!queue.offer(it)) { queue.poll(); queue.offer(it) } }
 
-    clientCount.incrementAndGet()
+    // Logged only at the 0->1 and 1->0 transitions (not per-client) — every active viewer
+    // shares CameraService's one capture pipeline already (addFrameListener/broadcastFrame),
+    // so this is purely an observability signal, not something that gates a resource open/
+    // close: any single remaining viewer's own keepalive ping already keeps the shared
+    // stream alive for everyone, which is simpler and more failure-tolerant than designating
+    // one specific client as "the" pinger and having to reassign that role if it disconnects.
+    if (clientCount.incrementAndGet() == 1) Log.i("$TAG/MJPEG", "first stream viewer connected")
     CameraService.addFrameListener(listener)
     try {
       val out = socket.getOutputStream()
@@ -224,7 +283,7 @@ object MjpegServerService : Service {
       }
     } finally {
       CameraService.removeFrameListener(listener)
-      clientCount.decrementAndGet()
+      if (clientCount.decrementAndGet() == 0) Log.i("$TAG/MJPEG", "last stream viewer disconnected")
     }
   }
 }
