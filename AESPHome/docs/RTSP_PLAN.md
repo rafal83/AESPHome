@@ -1,5 +1,39 @@
 # H.264 / RTSP
 
+## Status: real-device root cause confirmed and fixed (v2026.9.1)
+
+Continuing the diagnosis below: with the improved drain-loop logging shipped in v2026.9.1
+(exception type + full stack trace, not just a swallowed/unlogged catch), the exact failure
+was captured directly from the real device's logcat:
+
+```
+E/AESPHome/RTSP: encoder drain loop failed (IllegalStateException), tearing down
+E/AESPHome/RTSP: java.lang.IllegalStateException
+    at android.media.MediaCodec.native_dequeueOutputBuffer(Native Method)
+    at android.media.MediaCodec.dequeueOutputBuffer(MediaCodec.java:2717)
+    at com.aesphome.RtspServerService.startDrainLoop$lambda$9(rtsp_server.kt:393)
+```
+
+Confirmed on the device: **Person Detection was enabled** (its own periodic one-shot capture
+requests were the `Camera: one-shot capture requested` lines firing every ~2-3s throughout
+every earlier test), and RTSP's own lens selection reuses `CameraService`'s current choice
+directly — it is never a different physical camera. `dequeueOutputBuffer` throwing
+`IllegalStateException` (bare, no message) with no prior camera error logged is what a
+hardware AVC encoder whose input `Surface` never actually receives real camera frames looks
+like on this MediaTek-based device: the session *opens* without error, but with nothing
+feeding it, the encoder's internal state degrades until it errors out — consistently around
+10 seconds in, matching every real-device report of this bug from v0.2.2 onward.
+
+**Fix**: `startEncoder()` now refuses to start at all — logging exactly why — when Camera,
+MJPEG, or Person Detection is currently enabled, since any of them holds the same physical
+camera RTSP would try to open. This turns the failure from "PLAY succeeds, then something
+dies silently/cryptically ~10s later" into "DESCRIBE fails fast (~4s, via `sdpBody()`'s
+existing SPS/PPS poll timeout) with a clear reason in logcat." A real shared-CameraPipeline
+(one Camera2 session multiplexed across Camera/MJPEG/Person Detection/RTSP) remains the only
+way to let RTSP actually run *at the same time* as those features — audited, not attempted
+this pass; see below and `docs/SECURITY.md`. For now: disable Camera/MJPEG/Person Detection
+while using RTSP, and vice versa.
+
 ## Status: real-device diagnosis via VLC + adb (2026.9.0) — likely root cause found, one confirmed protocol gap fixed
 
 After v0.2.5's write-lock fix, real-device testing still reported the same "plays for a

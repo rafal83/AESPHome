@@ -266,6 +266,22 @@ object RtspServerService : Service {
     if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
       Log.e("$TAG/RTSP", "CAMERA permission not granted"); return
     }
+    // Diagnosed on real hardware: RTSP always targets the exact same physical camera Camera/
+    // MJPEG/Person Detection use (selectedIndex below is CameraService's own current lens
+    // choice, not an independent one), so if any of those already hold that camera open,
+    // starting a second, independent session on it doesn't fail cleanly on every device.
+    // On the device this was diagnosed on, it "succeeds" — the camera opens, the encoder
+    // starts — but the encoder's input Surface never actually receives real frames (starved
+    // by the other session's own captures), and after roughly 10s the hardware encoder's
+    // internal state degrades until MediaCodec.dequeueOutputBuffer throws
+    // IllegalStateException with no useful message — a confusing, delayed failure instead of
+    // an immediate, explained one. Refusing up front turns that into a fast, clear failure:
+    // sdpBody()'s poll-for-SPS/PPS times out in ~4s and DESCRIBE gets a clean 503, instead of
+    // PLAY succeeding and then dying silently 10s in.
+    if (isEnabled(context, CameraService) || isEnabled(context, MjpegServerService) || isEnabled(context, PersonDetectorService)) {
+      Log.e("$TAG/RTSP", "refusing to start — Camera/MJPEG/Person Detection is enabled and already holds this device's camera; disable them to use RTSP (see docs/RTSP_PLAN.md)")
+      return
+    }
     val nativeSize = CameraService.selectedResolution(context)
     if (nativeSize == null) {
       Log.e("$TAG/RTSP", "could not determine the camera's native resolution — is Camera enabled and its lens list refreshed?")
