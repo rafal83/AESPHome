@@ -221,23 +221,45 @@ class MainActivity : Activity() {
     // Grouped by UiSection (Sensor.kt) instead of one flat alphabetical list of 70+ rows —
     // each section is a collapsible (accordion-style) MaterialCardView: tapping its header
     // toggles the whole section's content, so the screen reads as a short list of section
-    // names rather than every single setting for every feature at once. A section starts
-    // expanded only if at least one of its components is currently enabled — collapsed
-    // otherwise — so what's actually active is visible without any taps, while everything
-    // else stays out of the way until asked for. Still built entirely from registry
-    // metadata: a new Sensor/Service/Setting needs no changes here to show up correctly
-    // grouped, as long as its id is mapped in Sensor.kt's UI_SECTION_BY_ID (anything missing
-    // there falls back to "Other" rather than being dropped).
+    // names rather than every single setting for every feature at once. Every section starts
+    // collapsed the very first time this screen is ever opened (deliberately not "expanded
+    // if anything inside is enabled" — with most sections having *something* on, that made
+    // nearly everything start expanded, which read as "no accordion at all"); each section's
+    // expanded/collapsed state is then remembered from then on (per section, across app
+    // restarts), so it stays exactly how the operator last left it. Still built entirely from
+    // registry metadata: a new Sensor/Service/Setting needs no changes here to show up
+    // correctly grouped, as long as its id is mapped in Sensor.kt's UI_SECTION_BY_ID (anything
+    // missing there falls back to "Other" rather than being dropped).
     val sections = Sensors.toggleables.groupBy { it.uiSection }
     val orderedSections = UiSection.entries.filter { sections.containsKey(it) }
+    // Filled in as each component's switch is built below, read back by the conflict-dialog
+    // handler so it can visually update the OTHER switch it just disabled (which may belong
+    // to a component built earlier or later than the one just toggled) without waiting for
+    // the whole screen to be rebuilt.
+    val switchByComponent = HashMap<Toggleable, MaterialSwitch>()
     for (section in orderedSections) {
       val groups = sections.getValue(section).sortedBy { it.label }
-      val startExpanded = groups.any { isEnabled(this, it) }
+      val expandedPrefKey = "ui_section_expanded_${section.name}"
+      val startExpanded = getFlag(this, expandedPrefKey, false)
 
       val sectionContent = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(16), 0, dp(16), dp(16))
         visibility = if (startExpanded) View.VISIBLE else View.GONE
+      }
+
+      // RTSP can't run at the same time as Camera/MJPEG/Person Detection on this hardware
+      // (docs/RTSP_PLAN.md) — surfaced here as a standing note, in addition to the switches
+      // below actively refusing the conflicting combination, so the constraint is visible
+      // even before anyone taps anything.
+      if (section == UiSection.CAMERA) {
+        sectionContent.addView(TextView(this).apply {
+          text = "RTSP Server cannot run at the same time as Camera, MJPEG, or Person " +
+              "Detection — they all use the same physical camera. Enabling one disables the others."
+          textSize = 12f
+          setTextColor(Color.GRAY)
+          setPadding(0, 0, 0, dp(12))
+        })
       }
 
       for ((index, component) in groups.withIndex()) {
@@ -250,6 +272,7 @@ class MainActivity : Activity() {
         val switch = MaterialSwitch(this)
         switch.text = component.label
         switch.isChecked = isEnabled(this, component)
+        switchByComponent[component] = switch
 
         val header = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         header.addView(switch)
@@ -268,7 +291,42 @@ class MainActivity : Activity() {
         // anything until it's back on, so there's nothing useful to show in the meantime.
         childRows.forEach { sectionContent.addView(it); it.visibility = if (switch.isChecked) View.VISIBLE else View.GONE }
 
+        // Guards against the programmatic `switch.isChecked = false` below re-entering this
+        // same listener as if the operator had tapped it themselves.
+        var suppressListener = false
         switch.setOnCheckedChangeListener { _, checked ->
+          if (suppressListener) return@setOnCheckedChangeListener
+
+          val conflict = if (checked) cameraConflictFor(this, component) else null
+          if (conflict != null) {
+            suppressListener = true
+            switch.isChecked = false // revert until the operator actually resolves the conflict below
+            suppressListener = false
+
+            AlertDialog.Builder(this)
+              .setTitle("Camera conflict")
+              .setMessage("${component.label} can't run at the same time as ${conflict.label} — " +
+                  "they both use this device's physical camera.\n\nDisable ${conflict.label} now to enable ${component.label}?")
+              .setPositiveButton("Disable ${conflict.label}") { _, _ ->
+                // Prefer toggling the OTHER component's own switch (if it's already been
+                // built) so its own listener does the real work consistently, rather than
+                // duplicating setEnabled()/stop() here — falls back to doing it directly for
+                // a component whose switch isn't on screen (a future conflict pair in a
+                // different section, in principle, even though today's only pair is not).
+                val otherSwitch = switchByComponent[conflict]
+                if (otherSwitch != null) {
+                  otherSwitch.isChecked = false
+                } else {
+                  setEnabled(this, conflict, false)
+                  if (conflict is Startable) conflict.stop(applicationContext)
+                }
+                switch.isChecked = true // re-enter this listener; no conflict now, so it takes the normal path below
+              }
+              .setNegativeButton("Cancel", null)
+              .show()
+            return@setOnCheckedChangeListener
+          }
+
           setEnabled(this, component, checked)
           if (component is Startable) {
             if (checked) component.start(applicationContext) else component.stop(applicationContext)
@@ -340,6 +398,7 @@ class MainActivity : Activity() {
           val expand = sectionContent.visibility != View.VISIBLE
           sectionContent.visibility = if (expand) View.VISIBLE else View.GONE
           chevron.text = if (expand) "▾" else "▸"
+          setFlag(this@MainActivity, expandedPrefKey, expand)
         }
       }
 

@@ -84,6 +84,22 @@ private const val RTSP_HANDSHAKE_TIMEOUT_MS = 30_000
 // before the client just reports EOF with no explanation.
 private const val ENCODER_STARTUP_TIMEOUT_MS = 6_000L
 
+// The Toggleables that hold this device's physical camera open in a way that conflicts with
+// RTSP's own independent session (see the file header comment for why). Exposed here — not
+// just inside RtspServerService.startEncoder()'s own guard below — so MainActivity can block
+// the conflicting UI toggle up front, before the operator ever configures a combination that
+// would otherwise only fail once a client actually tries to connect.
+internal val RTSP_CAMERA_CONFLICTS: List<Toggleable> = listOf(CameraService, MjpegServerService, PersonDetectorService)
+
+// The specific other Toggleable currently enabled that would conflict with enabling
+// `component` (RTSP vs. any of RTSP_CAMERA_CONFLICTS, checked in both directions), or null if
+// there's no conflict right now.
+internal fun cameraConflictFor(context: Context, component: Toggleable): Toggleable? = when (component) {
+  RtspServerService -> RTSP_CAMERA_CONFLICTS.firstOrNull { isEnabled(context, it) }
+  in RTSP_CAMERA_CONFLICTS -> if (isEnabled(context, RtspServerService)) RtspServerService else null
+  else -> null
+}
+
 object RtspServerService : Service {
   override val id                  = "rtsp_server"
   override val label               = "RTSP Server"
@@ -276,8 +292,8 @@ object RtspServerService : Service {
     // an immediate, explained one. Refusing up front turns that into a fast, clear failure:
     // sdpBody()'s poll-for-SPS/PPS times out in ~4s and DESCRIBE gets a clean 503, instead of
     // PLAY succeeding and then dying silently 10s in.
-    if (isEnabled(context, CameraService) || isEnabled(context, MjpegServerService) || isEnabled(context, PersonDetectorService)) {
-      Log.e("$TAG/RTSP", "refusing to start — Camera/MJPEG/Person Detection is enabled and already holds this device's camera; disable them to use RTSP (see docs/RTSP_PLAN.md)")
+    cameraConflictFor(context, RtspServerService)?.let { conflict ->
+      Log.e("$TAG/RTSP", "refusing to start — ${conflict.label} is enabled and already holds this device's camera; disable it to use RTSP (see docs/RTSP_PLAN.md)")
       return
     }
     val nativeSize = CameraService.selectedResolution(context)
