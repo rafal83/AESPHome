@@ -67,6 +67,18 @@ private const val NAL_TYPE_SPS = 7
 private const val NAL_TYPE_PPS = 8
 private const val NAL_TYPE_IDR = 5
 
+// A handful, not MJPEG's 8 — every session opens/holds the one shared H.264 encoder open,
+// so there's no real use case for many simultaneous RTSP viewers the way there is for
+// MJPEG's lighter-weight per-client JPEG copies.
+private const val MAX_CONCURRENT_RTSP_SESSIONS = 4
+
+// Applies only before PLAY — a read timing out while a session IS playing is normal (the
+// RTSP control channel goes quiet for the whole stream; all the action is on the
+// interleaved data channel) and must not tear down a healthy stream. Before PLAY, an
+// abandoned handshake (a client that connected but never finished OPTIONS/DESCRIBE/SETUP)
+// would otherwise hold a thread open forever, same as the MJPEG server's read timeout.
+private const val RTSP_HANDSHAKE_TIMEOUT_MS = 30_000
+
 object RtspServerService : Service {
   override val id                  = "rtsp_server"
   override val label               = "RTSP Server"
@@ -85,11 +97,36 @@ object RtspServerService : Service {
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
       enabledByDefaultHa = false, icon = "mdi:speedometer")
 
+  // Not exposed to HA on purpose — same reasoning as MJPEG's authSetting (mjpeg_server.kt):
+  // letting any HA user remotely disable the one thing gating access to a raw camera feed
+  // defeats the point of it being configurable at all. RTSP's own Authorization header only
+  // has a well-defined Basic scheme in practice for this kind of embedded server — Digest
+  // would need a materially larger implementation (nonce tracking, replay protection) for a
+  // LAN camera stream's realistic threat model; Basic is accepted here but documented as
+  // such (see docs/SECURITY.md) rather than presented as equivalent to a proper Digest flow.
+  val authSetting = SelectSetting(
+      id = "rtsp_require_auth", label = "RTSP Require Auth", options = listOf("Disabled", "Enabled"),
+      default = "Disabled", deviceUi = true, homeAssistant = false, entityCategory = EntityCategory.CONFIG,
+      icon = "mdi:key-outline")
+
   // No resolution setting of its own — streams whatever CameraService's currently-selected
   // lens/resolution already is (CameraService.selectedResolution()), same "one camera, one
   // resolution" answer the JPEG/MJPEG path gives, rather than offering an independent choice
   // for what's conceptually the same camera.
   override val settings: List<Setting> = listOf(portSetting, bitrateSetting)
+  override val selectSettings: List<SelectSetting> = listOf(authSetting)
+
+  fun authRequired(context: Context): Boolean = getSelectSetting(context, authSetting) == "Enabled"
+
+  fun credentials(context: Context): Pair<String, String> {
+    val username = getStringFlag(context, "rtsp_username", "aesphome")
+    var password = getStringFlag(context, "rtsp_password", "")
+    if (password.isEmpty()) {
+      password = UUID.randomUUID().toString().replace("-", "").take(16)
+      setStringFlag(context, "rtsp_password", password)
+    }
+    return username to password
+  }
 
   @Volatile private var running = false
   private var serverSocket: ServerSocket? = null
@@ -109,7 +146,15 @@ object RtspServerService : Service {
 
   fun url(context: Context): String? {
     val ip = getWifiIpAddress() ?: return null
-    return "rtsp://$ip:${getSetting(context, portSetting).toInt()}/aesphome"
+    val port = getSetting(context, portSetting).toInt()
+    // Credentials embedded directly in the URL (standard RTSP convention ffmpeg/VLC/go2rtc
+    // all understand) when auth is enabled — avoids needing a separate in-app field just to
+    // show them; this is the one place an operator needs them, to paste into a player/NVR.
+    val auth = if (getSelectSetting(context, authSetting) == "Enabled") {
+      val (username, password) = credentials(context)
+      "$username:$password@"
+    } else ""
+    return "rtsp://$auth$ip:$port/aesphome"
   }
 
   override fun start(context: Context) {
@@ -130,7 +175,7 @@ object RtspServerService : Service {
 
   private fun acceptLoop(context: Context) {
     val wifiIp = getWifiIpAddress()
-    if (wifiIp == null) { Log.e(TAG, "RTSP server: no Wi-Fi IP yet, not starting"); return }
+    if (wifiIp == null) { Log.e("$TAG/RTSP", "no Wi-Fi IP yet, not starting"); return }
     val port = getSetting(context, portSetting).toInt()
     try {
       val server = ServerSocket()
@@ -138,15 +183,20 @@ object RtspServerService : Service {
       server.bind(InetSocketAddress(InetAddress.getByName(wifiIp), port))
       serverSocket = server
       RtspServerRunningSensor.updateState(true)
-      Log.i(TAG, "RTSP server listening on $wifiIp:$port")
+      Log.i("$TAG/RTSP", "listening on $wifiIp:$port")
       while (running) {
         val socket = try { server.accept() } catch (e: IOException) { break }
+        if (sessions.size >= MAX_CONCURRENT_RTSP_SESSIONS) {
+          Log.w("$TAG/RTSP", "at MAX_CONCURRENT_RTSP_SESSIONS ($MAX_CONCURRENT_RTSP_SESSIONS) — rejecting new connection")
+          try { socket.close() } catch (e: IOException) {}
+          continue
+        }
         val session = RtspSession(this, context, socket)
         sessions.add(session)
         session.start()
       }
     } catch (e: IOException) {
-      Log.e(TAG, "RTSP server failed to bind: ${e.message}")
+      Log.e("$TAG/RTSP", "failed to bind: ${e.message}")
     } finally {
       RtspServerRunningSensor.updateState(false)
     }
@@ -196,11 +246,11 @@ object RtspServerService : Service {
 
   private fun startEncoder(context: Context) {
     if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-      Log.e(TAG, "RTSP: CAMERA permission not granted"); return
+      Log.e("$TAG/RTSP", "CAMERA permission not granted"); return
     }
     val nativeSize = CameraService.selectedResolution(context)
     if (nativeSize == null) {
-      Log.e(TAG, "RTSP: could not determine the camera's native resolution — is Camera enabled and its lens list refreshed?")
+      Log.e("$TAG/RTSP", "could not determine the camera's native resolution — is Camera enabled and its lens list refreshed?")
       return
     }
     val (width, height) = nativeSize.width to nativeSize.height
@@ -212,10 +262,10 @@ object RtspServerService : Service {
       setInteger(MediaFormat.KEY_FRAME_RATE, 15)
       setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
     }
-    val codec = try { MediaCodec.createEncoderByType("video/avc") } catch (e: Exception) { Log.e(TAG, "RTSP: encoder create failed", e); return }
+    val codec = try { MediaCodec.createEncoderByType("video/avc") } catch (e: Exception) { Log.e("$TAG/RTSP", "encoder create failed", e); return }
     try {
       codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-    } catch (e: Exception) { Log.e(TAG, "RTSP: encoder configure failed", e); codec.release(); return }
+    } catch (e: Exception) { Log.e("$TAG/RTSP", "encoder configure failed", e); codec.release(); return }
     val inputSurface = codec.createInputSurface()
     codec.start()
     mediaCodec = codec
@@ -223,8 +273,8 @@ object RtspServerService : Service {
     startDrainLoop(codec)
 
     val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    val ids = try { manager.cameraIdList } catch (e: Exception) { Log.e(TAG, "RTSP: cameraIdList failed", e); stopEncoder(); return }
-    if (ids.isEmpty()) { Log.e(TAG, "RTSP: no cameras found"); stopEncoder(); return }
+    val ids = try { manager.cameraIdList } catch (e: Exception) { Log.e("$TAG/RTSP", "cameraIdList failed", e); stopEncoder(); return }
+    if (ids.isEmpty()) { Log.e("$TAG/RTSP", "no cameras found"); stopEncoder(); return }
     // Same lens selection CameraService's JPEG pipeline uses, for a consistent "which camera
     // is this device's camera" answer between both — but a fully independent open, not a
     // shared session (see file header comment).
@@ -248,24 +298,43 @@ object RtspServerService : Service {
                     set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                   }.build()
                   session.setRepeatingRequest(request, null, handler)
-                } catch (e: Exception) { Log.e(TAG, "RTSP: setRepeatingRequest failed", e); stopEncoder() }
+                } catch (e: Exception) { Log.e("$TAG/RTSP", "setRepeatingRequest failed", e); stopEncoder() }
               }
-              override fun onConfigureFailed(session: CameraCaptureSession) { Log.e(TAG, "RTSP: createCaptureSession failed"); stopEncoder() }
+              override fun onConfigureFailed(session: CameraCaptureSession) { Log.e("$TAG/RTSP", "createCaptureSession failed"); stopEncoder() }
             }, handler)
-          } catch (e: Exception) { Log.e(TAG, "RTSP: createCaptureSession threw", e); stopEncoder() }
+          } catch (e: Exception) { Log.e("$TAG/RTSP", "createCaptureSession threw", e); stopEncoder() }
         }
         override fun onDisconnected(device: CameraDevice) { device.close(); stopEncoder() }
         override fun onError(device: CameraDevice, error: Int) {
-          // error 4 (ERROR_CAMERA_IN_USE) here almost always means Camera/MJPEG has the lens
-          // open already — see the "separate camera session" note in the file header comment.
-          Log.e(TAG, "RTSP: camera error $error — is Camera/MJPEG using the same lens?")
+          // ERROR_CAMERA_IN_USE here almost always means Camera/MJPEG has the lens open
+          // already — see the "separate camera session" note in the file header comment.
+          // Logged explicitly as the documented fallback (not a crash, not a silent no-op)
+          // rather than a full shared-CameraPipeline abstraction: this app's Camera2 usage
+          // was deliberately kept as two independent single-output sessions (JPEG ImageReader
+          // for Camera/MJPEG, encoder Surface for RTSP) specifically because it was judged a
+          // smaller risk than merging them into one multi-output session shared across two
+          // otherwise-independent features — see docs/IMPLEMENTATION_REPORT.md's hardening-
+          // pass notes for the full reasoning.
+          if (error == CameraDevice.StateCallback.ERROR_CAMERA_IN_USE) {
+            Log.e("$TAG/RTSP", "camera multi-output unsupported here, fallback active — lens already in use by Camera/MJPEG")
+          } else {
+            Log.e("$TAG/RTSP", "camera error $error")
+          }
           device.close()
           stopEncoder()
         }
       }, handler)
-    } catch (e: Exception) { Log.e(TAG, "RTSP: openCamera failed", e); stopEncoder() }
+    } catch (e: Exception) { Log.e("$TAG/RTSP", "openCamera failed", e); stopEncoder() }
   }
 
+  // Synchronized: called from several different callback threads on failure paths (the
+  // camera thread's onError/onDisconnected/onConfigureFailed, startEncoder() itself, and
+  // sessionEnded() from any RtspSession's own handler thread) — without this, two of those
+  // racing could both see a non-null cameraDevice/captureSession and both attempt to close
+  // it, or one could null out a field the other is mid-read on. Every individual close() is
+  // already wrapped in try/catch (double-close is harmless on Android's Camera2 objects
+  // regardless), so this is about avoiding the race itself, not just tolerating its outcome.
+  @Synchronized
   private fun stopEncoder() {
     streaming = false
     drainThread?.interrupt(); drainThread = null
@@ -425,12 +494,24 @@ internal class RtspSession(private val server: RtspServerService, private val co
 
   private fun handle() {
     try {
+      // Only bounds the pre-PLAY handshake — a read timing out while `playing` is true is
+      // normal (the control channel goes quiet for the whole stream) and must not be
+      // mistaken for an abandoned connection; caught and ignored below in that case.
+      socket.soTimeout = RTSP_HANDSHAKE_TIMEOUT_MS
       val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charset.forName("ISO-8859-1")))
       while (true) {
-        val requestLine = reader.readLine() ?: break
+        val requestLine = try { reader.readLine() } catch (e: java.net.SocketTimeoutException) {
+          if (playing) continue else throw e // idle-but-healthy stream vs. a truly abandoned handshake
+        } ?: break
         if (requestLine.isBlank()) continue
         val headers = readHeaders(reader)
         val cseq = headers["cseq"] ?: "0"
+
+        if (RtspServerService.authRequired(context) && !isAuthorized(headers)) {
+          respondUnauthorized(cseq)
+          continue
+        }
+
         when (requestLine.substringBefore(" ")) {
           "OPTIONS" -> respond(cseq, "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n")
           "DESCRIBE" -> {
@@ -450,12 +531,30 @@ internal class RtspSession(private val server: RtspServerService, private val co
         }
       }
     } catch (e: IOException) {
-      // Expected for a client that disconnects mid-session.
+      // Expected for a client that disconnects mid-session, or a genuinely abandoned
+      // pre-PLAY handshake finally timing out (RTSP_HANDSHAKE_TIMEOUT_MS).
     } finally {
       playing = false
       server.sessionEnded(this)
       close()
     }
+  }
+
+  // RTSP Basic auth (RFC 2617, reused as-is — no RTSP-specific auth scheme is standardized;
+  // this is the same scheme plenty of embedded IP cameras' RTSP servers use). Documented as
+  // Basic, not Digest — see authSetting's doc comment (rtsp_server.kt) and docs/SECURITY.md
+  // for why a full Digest implementation wasn't judged worth it for this threat model.
+  private fun isAuthorized(headers: Map<String, String>): Boolean {
+    val header = headers["authorization"] ?: return false
+    val encoded = header.removePrefix("Basic ").trim()
+    val decoded = try { String(Base64.decode(encoded, Base64.DEFAULT)) } catch (e: Exception) { return false }
+    val (expectedUser, expectedPass) = RtspServerService.credentials(context)
+    return java.security.MessageDigest.isEqual(decoded.toByteArray(), "$expectedUser:$expectedPass".toByteArray())
+  }
+
+  private fun respondUnauthorized(cseq: String) {
+    val bytes = "RTSP/1.0 401 Unauthorized\r\nCSeq: $cseq\r\nWWW-Authenticate: Basic realm=\"aesphome\"\r\n\r\n".toByteArray()
+    synchronized(socketWriteLock) { socket.getOutputStream().write(bytes) }
   }
 
   private fun readHeaders(reader: BufferedReader): Map<String, String> {
@@ -494,7 +593,11 @@ internal class RtspSession(private val server: RtspServerService, private val co
   // confirms rather than insisting on what it originally asked for.
   private fun respondSetup(cseq: String) {
     val text = "RTSP/1.0 200 OK\r\nCSeq: $cseq\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\nSession: $sessionId\r\n\r\n"
-    socket.getOutputStream().write(text.toByteArray())
+    // This write was missing socketWriteLock (every other response method uses it) — the
+    // exact same class of race socketWriteLock exists to prevent: a re-SETUP mid-stream
+    // (some clients do this) could otherwise interleave with the writer thread's RTP writes
+    // on the same socket with no ordering guarantee between them.
+    synchronized(socketWriteLock) { socket.getOutputStream().write(text.toByteArray()) }
   }
 
   // Called from RtspServerService's shared encoder drain thread — must never block (see the
