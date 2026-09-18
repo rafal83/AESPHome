@@ -79,6 +79,13 @@ private const val MAX_CONCURRENT_RTSP_SESSIONS = 4
 // would otherwise hold a thread open forever, same as the MJPEG server's read timeout.
 private const val RTSP_HANDSHAKE_TIMEOUT_MS = 30_000
 
+// How long the encoder drain loop waits for its very first output buffer before giving up —
+// see startDrainLoop()'s doc comment for exactly what this catches (a camera session that
+// opened but silently never delivered any frame to the encoder). Comfortably under most RTSP
+// clients' own ~10s "no data received" timeout, so this app's own diagnostic log appears
+// before the client just reports EOF with no explanation.
+private const val ENCODER_STARTUP_TIMEOUT_MS = 6_000L
+
 object RtspServerService : Service {
   override val id                  = "rtsp_server"
   override val label               = "RTSP Server"
@@ -143,6 +150,17 @@ object RtspServerService : Service {
   @Volatile private var streaming = false
   @Volatile private var spsNal: ByteArray? = null
   @Volatile private var ppsNal: ByteArray? = null
+
+  // No credentials, always trailing-slash — used as DESCRIBE's Content-Base (see respondBody
+  // call site), which exists purely to tell the client what base a relative SDP control URL
+  // ("a=control:trackID=0") resolves against; embedding credentials in it would be wrong
+  // (it's not a fetchable resource) and every RTSP client resolves relative-URL bases the
+  // same way regardless of auth.
+  internal fun baseUrl(context: Context): String? {
+    val ip = getWifiIpAddress() ?: return null
+    val port = getSetting(context, portSetting).toInt()
+    return "rtsp://$ip:$port/aesphome/"
+  }
 
   fun url(context: Context): String? {
     val ip = getWifiIpAddress() ?: return null
@@ -297,7 +315,23 @@ object RtspServerService : Service {
                     addTarget(inputSurface)
                     set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                   }.build()
-                  session.setRepeatingRequest(request, null, handler)
+                  // A real callback, not null: a null callback here means a per-capture
+                  // failure (e.g. from contention with another active session on the same
+                  // physical camera — Camera/MJPEG/person-detection's own capture pipeline —
+                  // on hardware whose camera HAL doesn't actually support two independent
+                  // concurrent sessions on one sensor) is completely invisible — no log, no
+                  // exception, nothing; the encoder's dequeueOutputBuffer just spins forever
+                  // getting no output, with no error anywhere to explain why. Rate-limited so
+                  // a sustained failure (every repeating-request capture failing) doesn't
+                  // flood logcat once per frame interval.
+                  var loggedFailures = 0
+                  session.setRepeatingRequest(request, object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: android.hardware.camera2.CaptureFailure) {
+                      if (loggedFailures++ < 3) {
+                        Log.e("$TAG/RTSP", "capture failed (reason=${failure.reason}, wasImageCaptured=${failure.wasImageCaptured()}) — likely contention with Camera/MJPEG/person detection on the same physical camera")
+                      }
+                    }
+                  }, handler)
                 } catch (e: Exception) { Log.e("$TAG/RTSP", "setRepeatingRequest failed", e); stopEncoder() }
               }
               override fun onConfigureFailed(session: CameraCaptureSession) { Log.e("$TAG/RTSP", "createCaptureSession failed"); stopEncoder() }
@@ -351,11 +385,33 @@ object RtspServerService : Service {
   }
 
   private fun startDrainLoop(codec: MediaCodec) {
+    val startedAtMs = System.currentTimeMillis()
     drainThread = Thread({
       val bufferInfo = MediaCodec.BufferInfo()
+      var everProducedOutput = false
       while (streaming) {
-        val outIndex = try { codec.dequeueOutputBuffer(bufferInfo, 100_000) } catch (e: Exception) { break }
-        if (outIndex < 0) continue
+        val outIndex = try { codec.dequeueOutputBuffer(bufferInfo, 100_000) } catch (e: Exception) {
+          Log.e("$TAG/RTSP", "encoder drain loop failed, tearing down: ${e.message}")
+          break
+        }
+        if (outIndex < 0) {
+          // dequeueOutputBuffer returning "nothing yet" (not an error — MediaCodec's normal
+          // "try again" return) forever, with zero output ever produced, is exactly what a
+          // camera session that opened but never actually delivered a frame to the encoder's
+          // input Surface looks like from here — no exception anywhere to catch, since
+          // nothing failed loudly; the frames just never arrived. Bounded so this shows up
+          // as a clear, explained log line well before a client's own ~10s "no data" timeout,
+          // instead of the encoder spinning here silently for the life of the session.
+          if (!everProducedOutput && System.currentTimeMillis() - startedAtMs > ENCODER_STARTUP_TIMEOUT_MS) {
+            Log.e("$TAG/RTSP", "no encoder output ${ENCODER_STARTUP_TIMEOUT_MS / 1000}s after starting — " +
+                "the camera almost certainly never delivered a frame to the encoder. Common cause: this " +
+                "device's camera can't run two independent concurrent sessions on the same physical lens " +
+                "— disable Camera/MJPEG/Person Detection while using RTSP, or vice versa.")
+            break
+          }
+          continue
+        }
+        everProducedOutput = true
         val buffer = codec.getOutputBuffer(outIndex)
         if (buffer == null) { try { codec.releaseOutputBuffer(outIndex, false) } catch (e: Exception) {}; continue }
         val data = ByteArray(bufferInfo.size)
@@ -381,6 +437,15 @@ object RtspServerService : Service {
           try { codec.releaseOutputBuffer(outIndex, false) } catch (e: Exception) {}
         }
       }
+      // Whatever ended this loop — a genuine stop() (streaming already false, so this is a
+      // harmless no-op), a dequeue exception, or the startup watchdog above — make sure
+      // `streaming` and every resource it gates come down together. Without this, a loop
+      // that exited on its own (not via an explicit stopEncoder() call from someone else)
+      // left `streaming` stuck true forever, and onSessionPlay() only ever calls
+      // startEncoder() when `!streaming` — so every subsequent RTSP session would silently
+      // get a PLAY 200 OK and then nothing, forever, with no way to notice short of
+      // restarting the app.
+      stopEncoder()
     }, "AESPHomeRtspEncoderDrain").apply { start() }
   }
 }
@@ -516,7 +581,11 @@ internal class RtspSession(private val server: RtspServerService, private val co
           "OPTIONS" -> respond(cseq, "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n")
           "DESCRIBE" -> {
             val sdp = server.sdpBody(context)
-            if (sdp == null) respondError(cseq, 503, "Service Unavailable") else respondWithBody(cseq, sdp)
+            if (sdp == null) {
+              respondError(cseq, 503, "Service Unavailable")
+            } else {
+              respondWithBody(cseq, sdp, server.baseUrl(context))
+            }
           }
           "SETUP" -> respondSetup(cseq)
           "PLAY" -> {
@@ -573,9 +642,15 @@ internal class RtspSession(private val server: RtspServerService, private val co
     synchronized(socketWriteLock) { socket.getOutputStream().write(bytes) }
   }
 
-  private fun respondWithBody(cseq: String, body: String) {
+  // Content-Base tells the client what to resolve the SDP's relative control URL
+  // ("a=control:trackID=0") against — several real RTSP clients (VLC/live555 among them)
+  // don't reliably fall back to the request URL itself when this is missing, and instead
+  // resolve the relative track URL incorrectly (or refuse it outright), which manifests as
+  // SETUP/PLAY going to the wrong URL or the client giving up right after DESCRIBE.
+  private fun respondWithBody(cseq: String, body: String, contentBase: String?) {
     val bodyBytes = body.toByteArray()
-    val text = "RTSP/1.0 200 OK\r\nCSeq: $cseq\r\nContent-Type: application/sdp\r\nContent-Length: ${bodyBytes.size}\r\n\r\n$body"
+    val baseHeader = if (contentBase != null) "Content-Base: $contentBase\r\n" else ""
+    val text = "RTSP/1.0 200 OK\r\nCSeq: $cseq\r\n${baseHeader}Content-Type: application/sdp\r\nContent-Length: ${bodyBytes.size}\r\n\r\n$body"
     synchronized(socketWriteLock) { socket.getOutputStream().write(text.toByteArray()) }
   }
 

@@ -1,5 +1,68 @@
 # H.264 / RTSP
 
+## Status: real-device diagnosis via VLC + adb (2026.9.0) — likely root cause found, one confirmed protocol gap fixed
+
+After v0.2.5's write-lock fix, real-device testing still reported the same "plays for a
+moment then dies" symptom. This time it was reproduced directly: with the tablet on the same
+LAN and reachable from a dev machine running VLC 3.0.20 with verbose logging
+(`--rtsp-tcp -vvv --logfile=...`) and `adb logcat` open on the device simultaneously —
+
+- **A raw hand-written RTSP client** (a small Python script driving the exact
+  OPTIONS/DESCRIBE/SETUP/PLAY/TEARDOWN sequence and reading the interleaved frames directly)
+  received a clean, continuous, correctly-framed RTP stream — hundreds of frames over 8-10s,
+  zero desync — proving the *protocol* implementation itself (framing, RTP/FU-A
+  packetization, the socketWriteLock fix) is correct.
+- **VLC** (real live555 client), against the exact same running server, got `PLAY` `200 OK`
+  and then **zero bytes of RTP data for the entire session** — `live555 demux warning: no
+  data received in 10s, eof?` — even with `--rtsp-tcp` forcing TCP interleaved from the very
+  first request (ruling out the known, harmless "tries UDP first" live555 quirk noted below).
+- **`adb logcat` showed no corresponding `AESPHome/RTSP` log line at all** for the failed
+  session — no camera error, no encoder error, nothing — while `Camera: one-shot capture
+  requested` (Camera/MJPEG/person-detection's own JPEG pipeline, on this device seemingly
+  enabled and firing every ~2-3s) kept cycling the same physical camera undisturbed the whole
+  time.
+
+**Likely root cause**: `MediaCodec.dequeueOutputBuffer()` returning "nothing yet" is not an
+error — it doesn't throw, so the old code's `catch (e: Exception)` never saw anything wrong.
+If the camera session RTSP opens for its own encoder input surface never actually gets a real
+frame delivered to it — plausible on hardware whose camera HAL doesn't support two truly
+independent concurrent sessions on one physical sensor, especially with another feature
+(Camera/MJPEG/person detection) already cycling that same camera every few seconds — the drain
+loop would just spin on "try again later" forever, producing zero output and logging zero
+errors, while the RTSP control channel (already answered `PLAY 200 OK` before any of this)
+has no way to tell the client anything went wrong. This was invisible for two compounding
+reasons, both fixed now:
+
+- `session.setRepeatingRequest(request, null, handler)` passed a **null** capture callback —
+  any actual per-capture failure (e.g. `ERROR_CAMERA_IN_USE`-adjacent contention that doesn't
+  surface through `CameraDevice.StateCallback`) was silently discarded. Now registers a real
+  `CaptureCallback` that logs `onCaptureFailed` (rate-limited to the first few).
+- The drain loop had no concept of "started but never produced anything" — it would spin
+  quietly forever. Added `ENCODER_STARTUP_TIMEOUT_MS` (6s): if zero output has been produced
+  by then, it logs an explicit diagnosis (naming the likely cause) and tears down, instead of
+  leaving the client to work out for itself, 4-10s later, that nothing is coming.
+- Separately: whatever ends the drain loop now always calls `stopEncoder()`. Previously, if
+  the loop ended any way other than an explicit external `stopEncoder()` call, `streaming`
+  could get stuck `true` forever — silently breaking *every future* RTSP session (each still
+  getting a normal-looking `PLAY 200 OK`) until the app was restarted, since
+  `onSessionPlay()` only calls `startEncoder()` when `!streaming`.
+
+**Also fixed, independently of the above**: `DESCRIBE`'s response was missing a
+`Content-Base` header. Several real RTSP clients (live555, which VLC uses, among them) rely
+on it to resolve the SDP's relative `a=control:trackID=0` URL; without it, resolution is
+implementation-defined rather than guaranteed. Verified this wasn't itself the primary cause
+here (the raw Python client resolved the same relative URL to the right place regardless,
+and VLC's own log showed it correctly deriving `.../aesphome/trackID=0` for `SETUP` even
+without the header) but it's a real, cheap-to-fix gap against other/future clients.
+
+**Still not proven**: which exact one of "HAL doesn't support two concurrent sessions" vs.
+some other cause is the *complete* explanation — that needs an A/B test (disable Camera/
+MJPEG/Person Detection entirely, retry RTSP alone) that wasn't done yet on this pass (the
+device this was diagnosed on had Device Owner set, which blocks the `adb uninstall` needed to
+swap in a differently-signed debug build for further live iteration — see `FAQ.md`). The
+watchdog/callback logging above will make the *next* attempt immediately conclusive either
+way, from logcat alone, without needing another multi-tool live debugging session to find it.
+
 ## Status: implemented, three real-device bugs found and fixed (v0.2.2 - v0.2.5)
 
 Real-device testing kept reporting the stream starting and then dying a few seconds later,

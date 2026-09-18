@@ -102,14 +102,15 @@ private const val F_DEVICE_INFO_NAME = 2
 private const val F_DEVICE_INFO_MAC_ADDRESS = 3
 private const val F_DEVICE_INFO_ESPHOME_VERSION = 4
 
-// Reported as DeviceInfoResponse's esphome_version — deliberately NOT this app's own version
-// (that's text_sensor.app_version, sensors/diagnostics_text.kt). HA's ESPHome integration
-// compares this string against the latest published ESPHome release and nags about an
-// available firmware update if it looks old; this device has no firmware to update (it's this
-// APK), so reporting our own low version number here only produces a spurious, permanently-
-// unresolvable "update available" warning. Bump this occasionally to a real, released ESPHome
-// version to keep it current — it does not need to track this app's own release cadence.
-private const val REPORTED_ESPHOME_VERSION = "2026.9.0"
+// Reported as DeviceInfoResponse's esphome_version. Used to be a hand-picked fake string
+// disconnected from this app's own version, specifically because the old SemVer-ish
+// "0.x.y" versionName looked nothing like a real ESPHome release and would have made HA's
+// ESPHome integration nag about a permanently-unresolvable "update available" (it compares
+// this string against real published ESPHome releases). Now that this app's own versionName
+// follows ESPHome/Home Assistant's own YYYY.M.PATCH convention (app/build.gradle), simply
+// reporting BuildConfig.VERSION_NAME here already looks like a plausible, recent ESPHome
+// version and needs no separate manual upkeep — see `esphomeVersion` below.
+private val esphomeVersion get() = BuildConfig.VERSION_NAME
 private const val F_DEVICE_INFO_MODEL = 6
 private const val F_DEVICE_INFO_MANUFACTURER = 12
 private const val F_DEVICE_INFO_FRIENDLY_NAME = 13
@@ -922,7 +923,7 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
             val builder = ProtobufMessageBuilder()
               .string(F_DEVICE_INFO_NAME, name)
               .string(F_DEVICE_INFO_MAC_ADDRESS, mac)
-              .string(F_DEVICE_INFO_ESPHOME_VERSION, REPORTED_ESPHOME_VERSION)
+              .string(F_DEVICE_INFO_ESPHOME_VERSION, esphomeVersion)
               .string(F_DEVICE_INFO_MODEL, "Android Simulating ESPHome Device")
               .string(F_DEVICE_INFO_MANUFACTURER, "ÆSPHome")
               .string(F_DEVICE_INFO_FRIENDLY_NAME, friendlyName)
