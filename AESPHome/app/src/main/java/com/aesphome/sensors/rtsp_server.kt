@@ -391,7 +391,7 @@ object RtspServerService : Service {
       var everProducedOutput = false
       while (streaming) {
         val outIndex = try { codec.dequeueOutputBuffer(bufferInfo, 100_000) } catch (e: Exception) {
-          Log.e("$TAG/RTSP", "encoder drain loop failed, tearing down: ${e.message}")
+          Log.e("$TAG/RTSP", "encoder drain loop failed (${e.javaClass.simpleName}), tearing down", e)
           break
         }
         if (outIndex < 0) {
