@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- A cyan/teal accent — reads clearly as "network device" without leaning on any specific
+       brand's palette. Theme.Material3.DayNight (themes.xml) derives dark-mode equivalents
+       from these automatically; no separate values-night/ overrides needed. -->
+  <color name="aesphome_primary">#00838F</color>
+  <color name="aesphome_primary_variant">#005662</color>
+  <color name="aesphome_secondary">#00ACC1</color>
+  <color name="aesphome_background">#FAFAFA</color>
+  <color name="aesphome_surface">#FFFFFF</color>
+
+  <color name="aesphome_status_granted">#2E7D32</color>
+  <color name="aesphome_status_denied">#C62828</color>
+</resources>

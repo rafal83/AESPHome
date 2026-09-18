@@ -1,6 +1,7 @@
 package com.aesphome
 
 import android.app.AppOpsManager
+import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.os.Build
@@ -92,6 +93,16 @@ fun isAccessibilityServiceEnabled(context: Context, service: Class<*>): Boolean 
   val enabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
   return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
 }
+
+// Device Owner has no in-app grant flow at all — the ONLY way to set it is
+// `adb shell dpm set-device-owner com.aesphome/.AESPHomeDeviceAdminReceiver`, once, before
+// any account is added on the device (or after a factory reset). There's nothing an Enable
+// button could open for it, unlike every other row on the Permissions screen — this is purely
+// a status check. Device Owner is what lets auto_update.kt install an update with zero taps
+// (PackageInstaller.Session.commit() from a Device Owner app doesn't show the normal
+// confirmation UI); without it, install falls back to the one-tap Intent.ACTION_VIEW flow.
+fun isDeviceOwner(context: Context): Boolean =
+    (context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager)?.isDeviceOwnerApp(context.packageName) == true
 
 // Usage Access ("PACKAGE_USAGE_STATS") is a special app-op permission with no runtime
 // prompt — this is the standard way to check whether it's actually been granted via its own

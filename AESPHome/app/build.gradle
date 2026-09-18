@@ -11,8 +11,8 @@ android {
     applicationId "com.aesphome"
     minSdk 22
     targetSdk 34
-    versionCode 7
-    versionName "0.2.4"
+    versionCode 8
+    versionName "0.2.5"
   }
 
   // Only configured when a keystore is actually present (release.yml decodes
@@ -70,6 +70,13 @@ dependencies {
   // dependency. Needed to hand a downloaded update APK to the system installer without
   // exposing a raw file:// path (blocked by StrictMode on API 24+).
   implementation 'androidx.core:core:1.13.1'
+  // Modernizes the hand-built settings/permissions/app-picker screens (MaterialSwitch,
+  // MaterialButton, MaterialCardView, TextInputLayout) — standard, small (~1-2MB), and
+  // present on virtually every modern Android app; no custom widget set was written instead.
+  // Pinned to 1.12.0, not the current latest (1.14.0): 1.13+ pulls in androidx.core 1.16.0,
+  // which requires compileSdk 35 + AGP 8.6+ — a larger, separate change from "add Material
+  // Components" that wasn't made in this pass.
+  implementation 'com.google.android.material:material:1.12.0'
   // Person-presence detection (sensors/person_detector.kt) — the high-level Task Library API
   // (not the raw Interpreter API) so this app doesn't hand-roll anchor decoding/NMS; CPU-only
   // (no tensorflow-lite-gpu) since the GPU delegate's device/driver compatibility is far less

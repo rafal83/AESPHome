@@ -50,14 +50,16 @@
 
   <!-- Auto-update (sensors/auto_update.kt): lets this app launch the system package installer
        for an update APK it downloaded itself — the user still has to tap "Install" on
-       Android's own confirmation screen (unavoidable without root/device-owner, same as any
-       other sideloaded-app updater such as F-Droid). -->
+       Android's own confirmation screen unless the app is also Device Owner (no in-app grant
+       flow for that — see utils.kt's isDeviceOwner() and FAQ.md), in which case the same
+       download installs with zero taps via PackageInstaller. -->
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
   <application
       android:label="ÆSPHome"
       android:allowBackup="true"
-      android:icon="@mipmap/ic_launcher">
+      android:icon="@mipmap/ic_launcher"
+      android:theme="@style/Theme.AESPHome">
 
     <activity
         android:name=".MainActivity"
@@ -71,12 +73,14 @@
     <activity
         android:name=".PermissionsActivity"
         android:exported="false"
-        android:label="Permissions" />
+        android:label="Permissions"
+        android:parentActivityName=".MainActivity" />
 
     <activity
         android:name=".AppLauncherSettingsActivity"
         android:exported="false"
-        android:label="Allowed Apps" />
+        android:label="Allowed Apps"
+        android:parentActivityName=".MainActivity" />
 
     <service
         android:name=".AESPHomeService"
@@ -115,6 +119,14 @@
           android:name="android.accessibilityservice.config"
           android:resource="@xml/accessibility_service_config" />
     </service>
+
+    <!-- Receives PackageInstaller's async commit result for a Device Owner silent install
+         (auto_update.kt) — success/failure, or a fallback confirmation UI if a specific
+         device doesn't fully honor the silent-install privilege. Not exported: only this
+         app's own PendingIntent (passed to PackageInstaller.Session.commit()) ever targets it. -->
+    <receiver
+        android:name=".AESPHomeUpdateInstallReceiver"
+        android:exported="false" />
 
     <!-- Hands the downloaded update APK (auto_update.kt) to the system installer as a
          content:// URI instead of a raw file:// path — required on API 24+. -->

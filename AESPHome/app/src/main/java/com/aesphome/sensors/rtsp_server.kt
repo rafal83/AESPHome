@@ -382,6 +382,16 @@ internal class RtspSession(private val server: RtspServerService, private val co
   @Volatile private var writerRunning = false
   private var writerThread: Thread? = null
 
+  // Guards every write to the socket's OutputStream — RTSP control responses (handle()'s
+  // thread) and RTP data (the writer thread) would otherwise both write to the same socket
+  // from two different threads with no ordering guarantee between them. A real bug this
+  // fixes: PLAY's own response could race with the first queued RTP frame and lose, so the
+  // client received binary interleaved-RTP bytes before ever seeing "RTSP/1.0 200 OK" for
+  // PLAY — enough to permanently desync a client's interleaved-frame parser right at the
+  // point PLAY completes, matching a real-device report of RTSP failing the same way, every
+  // time, a fixed few seconds after PLAY.
+  private val socketWriteLock = Any()
+
   fun start() {
     writerRunning = true
     writerThread = Thread({ writerLoop() }, "AESPHomeRtspWriter").apply { start() }
@@ -429,9 +439,11 @@ internal class RtspSession(private val server: RtspServerService, private val co
           }
           "SETUP" -> respondSetup(cseq)
           "PLAY" -> {
-            playing = true
+            // Order matters: the response must reach the client before playing=true can let
+            // the writer thread send any RTP data — see socketWriteLock's doc comment above.
             server.onSessionPlay(context)
             respond(cseq, "Range: npt=0.000-\r\nSession: $sessionId\r\nRTP-Info: url=trackID=0;seq=$seq\r\n")
+            playing = true
           }
           "TEARDOWN" -> { respond(cseq, "Session: $sessionId\r\n"); break }
           else -> respondError(cseq, 501, "Not Implemented")
@@ -458,17 +470,19 @@ internal class RtspSession(private val server: RtspServerService, private val co
   }
 
   private fun respond(cseq: String, extraHeaders: String) {
-    socket.getOutputStream().write("RTSP/1.0 200 OK\r\nCSeq: $cseq\r\n$extraHeaders\r\n".toByteArray())
+    val bytes = "RTSP/1.0 200 OK\r\nCSeq: $cseq\r\n$extraHeaders\r\n".toByteArray()
+    synchronized(socketWriteLock) { socket.getOutputStream().write(bytes) }
   }
 
   private fun respondWithBody(cseq: String, body: String) {
-    val bytes = body.toByteArray()
-    val text = "RTSP/1.0 200 OK\r\nCSeq: $cseq\r\nContent-Type: application/sdp\r\nContent-Length: ${bytes.size}\r\n\r\n$body"
-    socket.getOutputStream().write(text.toByteArray())
+    val bodyBytes = body.toByteArray()
+    val text = "RTSP/1.0 200 OK\r\nCSeq: $cseq\r\nContent-Type: application/sdp\r\nContent-Length: ${bodyBytes.size}\r\n\r\n$body"
+    synchronized(socketWriteLock) { socket.getOutputStream().write(text.toByteArray()) }
   }
 
   private fun respondError(cseq: String, code: Int, text: String) {
-    socket.getOutputStream().write("RTSP/1.0 $code $text\r\nCSeq: $cseq\r\n\r\n".toByteArray())
+    val bytes = "RTSP/1.0 $code $text\r\nCSeq: $cseq\r\n\r\n".toByteArray()
+    synchronized(socketWriteLock) { socket.getOutputStream().write(bytes) }
   }
 
   // Always confirms RTP/AVP/TCP interleaved (channel 0 for RTP, 1 for RTCP — RTCP channel is
@@ -539,7 +553,7 @@ internal class RtspSession(private val server: RtspServerService, private val co
     frame[3] = rtpLen.toByte()
     System.arraycopy(header, 0, frame, 4, header.size)
     System.arraycopy(payload, 0, frame, 4 + header.size, payload.size)
-    socket.getOutputStream().write(frame)
+    synchronized(socketWriteLock) { socket.getOutputStream().write(frame) }
   }
 }
 

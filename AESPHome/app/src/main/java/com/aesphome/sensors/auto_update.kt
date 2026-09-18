@@ -1,8 +1,12 @@
 package com.aesphome
 
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInstaller
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import androidx.core.content.FileProvider
 import java.io.File
@@ -21,12 +25,17 @@ import org.json.JSONObject
     a real ESPHome device's own OTA flow shows, rather than a plain binary_sensor + buttons.
 
     Checks this app's own GitHub fork (rafal83/AESPHome) for a newer tagged release than the
-    one currently installed. Actually installing it still needs one tap from the user on
-    Android's own "Install this app?" confirmation screen — there is no way around that
-    without root or being the device owner (this project targets neither), so the UPDATE
-    command downloads the release APK and hands it straight to the system installer rather
-    than pretending to install it silently. Same pattern any sideloaded-app updater (F-Droid,
-    Obtainium, ...) uses.
+    one currently installed. Two install paths, chosen automatically:
+
+      - Device Owner (isDeviceOwner(), utils.kt) — a genuinely silent install via
+        PackageInstaller.Session.commit(), no tap required. Device Owner has no in-app grant
+        flow; it's set once via `adb shell dpm set-device-owner
+        com.aesphome/.AESPHomeDeviceAdminReceiver` before any account is added on the device
+        (or after a factory reset) — see the Permissions screen and FAQ.md.
+      - Otherwise — the release APK is downloaded and handed to the system installer via a
+        FileProvider URI; the user still taps "Install" on Android's own confirmation screen.
+        Same pattern any sideloaded-app updater (F-Droid, Obtainium, ...) uses without special
+        device management privileges.
 
     Uses only what's already on the platform for the HTTP+JSON part (HttpURLConnection,
     org.json) — no new networking/JSON library — and androidx.core only for FileProvider
@@ -208,18 +217,98 @@ object AutoUpdateService : Service, UpdateEntity {
         }
         connection.disconnect()
 
-        val apkUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outFile)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-          setDataAndType(apkUri, "application/vnd.android.package-archive")
-          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (isDeviceOwner(context)) {
+          installSilently(context, outFile, version)
+          // Silent install is asynchronous too (PackageInstaller delivers its result via
+          // AESPHomeUpdateInstallReceiver below) — report() here just clears the download's
+          // own progress bar; the receiver reports the final in_progress=false.
+          report(inProgress = true, progress = null)
+        } else {
+          val apkUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outFile)
+          val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          }
+          context.startActivity(intent)
+          Log.i(TAG, "Auto update: downloaded $version, launched installer")
+          report(inProgress = false, progress = null)
         }
-        context.startActivity(intent)
-        Log.i(TAG, "Auto update: downloaded $version, launched installer")
-        report(inProgress = false, progress = null)
       } catch (e: Exception) {
         Log.e(TAG, "Auto update: download/install failed", e)
         report(inProgress = false, progress = null)
       }
     }, "AESPHomeAutoUpdateInstall").start()
+  }
+
+  // Device Owner only — PackageInstaller.Session.commit() from a Device Owner app installs
+  // without showing the normal confirmation UI (true since PackageInstaller existed, API 21;
+  // setRequireUserAction(false), API 31+, makes that explicit rather than implicit). The
+  // commit's actual result (success/failure, or — defensively — a device that still wants
+  // confirmation despite Device Owner status) arrives asynchronously via
+  // AESPHomeUpdateInstallReceiver, not here.
+  private fun installSilently(context: Context, apkFile: File, version: String) {
+    val installer = context.packageManager.packageInstaller
+    val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+    }
+    var sessionId = -1
+    try {
+      sessionId = installer.createSession(params)
+      installer.openSession(sessionId).use { session ->
+        apkFile.inputStream().use { input ->
+          session.openWrite("aesphome_update", 0, apkFile.length()).use { output ->
+            input.copyTo(output)
+            session.fsync(output)
+          }
+        }
+        val receiverIntent = Intent(context, AESPHomeUpdateInstallReceiver::class.java).apply {
+          putExtra(AESPHomeUpdateInstallReceiver.EXTRA_VERSION, version)
+        }
+        val pendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or
+            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_MUTABLE else 0)
+        val pendingIntent = PendingIntent.getBroadcast(context, sessionId, receiverIntent, pendingIntentFlags)
+        session.commit(pendingIntent.intentSender)
+        Log.i(TAG, "Auto update: silent install of $version committed (session $sessionId)")
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Auto update: silent install failed", e)
+      if (sessionId >= 0) try { installer.abandonSession(sessionId) } catch (e2: Exception) {}
+      AESPHomeService.instance?.pushUpdateState(this, UpdateState(currentVersion = currentVersion, latestVersion = version))
+    }
+  }
+}
+
+// Receives PackageInstaller's asynchronous commit result for a silent (Device Owner) install
+// — success, failure, or (defensively, in case a specific device/OEM doesn't fully honor
+// Device Owner's silent-install privilege) a fallback to the normal confirmation UI.
+class AESPHomeUpdateInstallReceiver : BroadcastReceiver() {
+  companion object { const val EXTRA_VERSION = "version" }
+
+  override fun onReceive(context: Context, intent: Intent) {
+    val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
+    val version = intent.getStringExtra(EXTRA_VERSION) ?: "v${BuildConfig.VERSION_NAME}"
+    when (status) {
+      PackageInstaller.STATUS_SUCCESS -> {
+        Log.i(TAG, "Auto update: silent install of $version succeeded")
+        // The app is about to be replaced/restarted by the OS — no further state push needed.
+      }
+      PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+        Log.e(TAG, "Auto update: device did not honor silent install — falling back to confirmation UI")
+        @Suppress("DEPRECATION")
+        val confirmIntent = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+        try {
+          confirmIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          confirmIntent?.let { context.startActivity(it) }
+        } catch (e: Exception) { Log.e(TAG, "Auto update: could not show install confirmation", e) }
+      }
+      else -> {
+        val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
+        Log.e(TAG, "Auto update: silent install of $version failed: status=$status message=$message")
+        AESPHomeService.instance?.pushUpdateState(AutoUpdateService, UpdateState(
+          currentVersion = "v${BuildConfig.VERSION_NAME}", latestVersion = version,
+        ))
+      }
+    }
   }
 }

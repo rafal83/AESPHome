@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- DayNight: Material 3 derives a dark-mode palette from these colors automatically,
+       following the device's system setting — no separate values-night/ overrides needed. -->
+  <style name="Theme.AESPHome" parent="Theme.Material3.DayNight">
+    <item name="colorPrimary">@color/aesphome_primary</item>
+    <item name="colorPrimaryVariant">@color/aesphome_primary_variant</item>
+    <item name="colorSecondary">@color/aesphome_secondary</item>
+    <item name="android:colorBackground">@color/aesphome_background</item>
+    <item name="colorSurface">@color/aesphome_surface</item>
+  </style>
+</resources>
