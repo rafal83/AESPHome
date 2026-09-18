@@ -321,6 +321,14 @@ class MainActivity : Activity() {
         setPadding(dp(16), dp(16), dp(16), dp(16))
         isClickable = true
         isFocusable = true
+        // Without this, a clickable plain LinearLayout shows literally no visual feedback
+        // on tap/press — indistinguishable from a static row, which was reported as "there's
+        // no accordion" even though the collapse logic itself was working correctly. The
+        // themed ripple/highlight drawable is what actually signals "this is tappable."
+        val pressedBackground = android.util.TypedValue().also {
+          theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true)
+        }
+        setBackgroundResource(pressedBackground.resourceId)
         addView(TextView(this@MainActivity).apply {
           text = section.label
           textSize = 16f
