@@ -13,6 +13,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import org.json.JSONObject
 
 
@@ -65,6 +66,31 @@ internal fun compareVersions(current: String, other: String): Int {
   return 0
 }
 
+// A GitHub Release asset is only ever a candidate update APK if its name ends in .apk AND
+// doesn't look like an unsigned or debug build (release.yml names those "*-unsigned.apk";
+// a debug CI artifact would say "*-debug.apk") — installing either over a real, signed
+// install would either fail outright or silently downgrade the install to something nobody
+// can verify. `allowDebugOrUnsigned` only ever comes from BuildConfig.DEBUG (checkNow()
+// below) — a real signed release build of this app can never set it, so this can't be
+// misconfigured by an end user; it only lets a developer's own debug build of AESPHome
+// self-update to another debug build while testing.
+internal fun isAcceptableUpdateApkName(name: String, allowDebugOrUnsigned: Boolean): Boolean {
+  val lower = name.lowercase()
+  if (!lower.endsWith(".apk")) return false
+  val looksUnsafe = lower.contains("unsigned") || lower.contains("debug")
+  return !looksUnsafe || allowDebugOrUnsigned
+}
+
+// Parses either a bare 64-hex-char digest or the standard `sha256sum` output format
+// ("<hash>  <filename>") — release.yml (see .github/workflows/release.yml) produces the
+// latter. Returns null (never throws) for anything that isn't a well-formed SHA-256 hex
+// digest, so a corrupted/truncated checksum asset fails safe as "can't verify" rather than
+// as a false match.
+internal fun parseSha256Checksum(text: String): String? {
+  val token = text.trim().split(Regex("\\s+")).firstOrNull() ?: return null
+  return if (token.length == 64 && token.all { it in "0123456789abcdefABCDEF" }) token.lowercase() else null
+}
+
 object AutoUpdateService : Service, UpdateEntity {
   override val id                  = "auto_update"
   override val label               = "AESPHome Firmware"
@@ -87,8 +113,12 @@ object AutoUpdateService : Service, UpdateEntity {
   private var appContext: Context? = null
 
   // Set by a successful check, consumed by the UPDATE command — the actual asset URL to
-  // download, not just "yes/no an update exists".
+  // download, not just "yes/no an update exists". pendingSha256Url is null when the release
+  // has no matching "<apk-name>.sha256" asset (e.g. one published before this checksum
+  // feature existed) — downloadAndInstall() treats that as "can't verify" and proceeds
+  // rather than permanently refusing to update past that point.
   @Volatile private var pendingApkUrl: String? = null
+  @Volatile private var pendingSha256Url: String? = null
   @Volatile private var pendingVersion: String? = null
 
   private val currentVersion get() = "v${BuildConfig.VERSION_NAME}"
@@ -150,19 +180,28 @@ object AutoUpdateService : Service, UpdateEntity {
 
       val isNewer = compareVersions(latestTag, currentVersion) > 0
       pendingApkUrl = null
+      pendingSha256Url = null
       pendingVersion = null
 
       if (isNewer) {
         val assets = json.optJSONArray("assets")
-        for (i in 0 until (assets?.length() ?: 0)) {
-          val asset = assets!!.getJSONObject(i)
-          if (asset.optString("name").endsWith(".apk")) {
-            pendingApkUrl = asset.optString("browser_download_url")
-            pendingVersion = latestTag
-            break
-          }
+        val assetList = (0 until (assets?.length() ?: 0)).map { assets!!.getJSONObject(it) }
+        // Prefer a name containing "release" when more than one acceptable .apk asset
+        // exists — release.yml always names the real signed artifact "*-release.apk".
+        val apkAsset = assetList
+          .filter { isAcceptableUpdateApkName(it.optString("name"), allowDebugOrUnsigned = BuildConfig.DEBUG) }
+          .sortedByDescending { it.optString("name").lowercase().contains("release") }
+          .firstOrNull()
+        if (apkAsset != null) {
+          val apkName = apkAsset.optString("name")
+          pendingApkUrl = apkAsset.optString("browser_download_url")
+          pendingSha256Url = assetList.firstOrNull { it.optString("name") == "$apkName.sha256" }
+              ?.optString("browser_download_url")
+          pendingVersion = latestTag
+          Log.i(TAG, "Auto update: $latestTag available (current $currentVersion)")
+        } else {
+          Log.e(TAG, "Auto update: $latestTag has no acceptable .apk asset — not offering it")
         }
-        Log.i(TAG, "Auto update: $latestTag available (current $currentVersion)")
       }
 
       // latestVersion reported as the current one when nothing newer was found — HA's update
@@ -187,6 +226,7 @@ object AutoUpdateService : Service, UpdateEntity {
   fun downloadAndInstall(context: Context) {
     val url = pendingApkUrl
     val version = pendingVersion
+    val sha256Url = pendingSha256Url
     if (url == null || version == null) {
       Log.e(TAG, "Auto update: install requested but no update is pending — checking now")
       checkNow(context)
@@ -229,6 +269,49 @@ object AutoUpdateService : Service, UpdateEntity {
         }
         connection.disconnect()
 
+        if (totalBytes > 0 && downloaded != totalBytes) {
+          Log.e(TAG, "Auto update: incomplete download ($downloaded/$totalBytes bytes) — discarding")
+          outFile.delete()
+          report(inProgress = false, progress = null)
+          return@Thread
+        }
+
+        // Never install anything without checking it against the checksum GitHub Actions
+        // computed for it (see .github/workflows/release.yml) — a corrupted download, a
+        // tampered mirror, or a truncated transfer that happened to still match totalBytes
+        // must never reach the installer. sha256Url is only null for a release published
+        // before this checksum feature existed (see pendingSha256Url's doc comment above);
+        // that's the one case this proceeds without verification.
+        if (sha256Url != null) {
+          val expected = try {
+            (URL(sha256Url).openConnection() as HttpURLConnection).apply {
+              connectTimeout = 10_000; readTimeout = 10_000
+            }.let { conn ->
+              try {
+                if (conn.responseCode !in 200..299) null
+                else conn.inputStream.bufferedReader().use { it.readText() }.let(::parseSha256Checksum)
+              } finally { conn.disconnect() }
+            }
+          } catch (e: Exception) { null }
+
+          if (expected == null) {
+            Log.e(TAG, "Auto update: could not fetch/parse checksum — refusing to install")
+            outFile.delete()
+            report(inProgress = false, progress = null)
+            return@Thread
+          }
+          val actual = sha256Hex(outFile)
+          if (!actual.equals(expected, ignoreCase = true)) {
+            Log.e(TAG, "Auto update: checksum mismatch — refusing to install")
+            outFile.delete()
+            report(inProgress = false, progress = null)
+            return@Thread
+          }
+          Log.i(TAG, "Auto update: checksum valid")
+        } else {
+          Log.e(TAG, "Auto update: no checksum asset for $version — installing unverified")
+        }
+
         if (isDeviceOwner(context)) {
           installSilently(context, outFile, version)
           // Silent install is asynchronous too (PackageInstaller delivers its result via
@@ -250,6 +333,19 @@ object AutoUpdateService : Service, UpdateEntity {
         report(inProgress = false, progress = null)
       }
     }, "AESPHomeAutoUpdateInstall").start()
+  }
+
+  private fun sha256Hex(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+      val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+      while (true) {
+        val read = input.read(buffer)
+        if (read < 0) break
+        digest.update(buffer, 0, read)
+      }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
   }
 
   // Device Owner only — PackageInstaller.Session.commit() from a Device Owner app installs
