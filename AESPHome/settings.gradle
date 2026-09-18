@@ -9,6 +9,11 @@ dependencyResolutionManagement {
   repositories {
     google()
     mavenCentral()
+    // noise-java (rweather/noise-java) — the Noise Protocol Framework implementation used
+    // for ESPHome's encrypted API transport (see app/src/main/java/com/aesphome/noise.kt) —
+    // has no Maven Central artifact, only a JitPack-built one, pinned to a commit SHA since
+    // the upstream repo has no tagged releases.
+    maven { url "https://jitpack.io" }
   }
 }
 rootProject.name = "AESPHome"

@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import com.southernstorm.noise.protocol.CipherStatePair
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -355,6 +356,13 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
 
   private var activeConn: Socket? = null
 
+  // Non-null exactly when the current activeConn is a Noise-encrypted connection (set once
+  // performNoiseServerHandshake() succeeds, cleared together with activeConn on disconnect)
+  // — readMessage()/send() below branch on this to pick plaintext vs. Noise framing for
+  // whatever connection is currently active. There's only ever one at a time (this whole
+  // class handles a single client connection, same as activeConn always has).
+  private var noiseCiphers: CipherStatePair? = null
+
   // Read by CameraService's idle loop to skip capturing when nobody's listening,
   // without it needing to know what a connection actually is.
   val hasActiveConnection: Boolean get() = activeConn != null
@@ -463,10 +471,27 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
 
 
   //
-  //
+  // Dispatches on the connection's leading frame-indicator byte (0x00 plaintext, 0x01
+  // Noise — see noise.kt) exactly once per connection: readMessage() is always called first
+  // with noiseCiphers still null, so a Noise indicator on the very first read runs the full
+  // handshake right here and then recurses to read the first real (now-encrypted) message
+  // the exact same way any later one is read. Every subsequent call for this same connection
+  // has noiseCiphers already set and skips straight to the Noise branch.
   //
   private fun readMessage(conn: Socket): Pair<Int, ByteArray> {
-    if (recvExact(conn, 1)[0].toInt() != 0) throw IOException("expected plaintext preamble")
+    noiseCiphers?.let { return readNoiseDataMessage(conn, it.getReceiver()) }
+
+    val indicator = recvExact(conn, 1)[0].toInt() and 0xFF
+    if (indicator == FRAME_INDICATOR_NOISE) {
+      val psk = NoiseEncryptionSettings.getReadyPsk(appContext)
+      if (psk == null) {
+        rejectNoiseConnection(conn, "Noise encryption is not enabled on this device")
+        throw IOException("Noise handshake attempted while disabled/unconfigured")
+      }
+      noiseCiphers = performNoiseServerHandshake(conn, psk, name, mac)
+      return readMessage(conn)
+    }
+    if (indicator != FRAME_INDICATOR_PLAINTEXT) throw IOException("unexpected frame indicator $indicator")
     val length = readVarintFromSocket(conn)
     val msgType = readVarintFromSocket(conn)
     val payload = if (length > 0) recvExact(conn, length) else ByteArray(0)
@@ -480,6 +505,7 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
   //
   @Synchronized
   private fun send(conn: Socket, msgType: Int, payload: ByteArray) {
+    noiseCiphers?.let { sendNoiseDataMessage(conn, it.getSender(), msgType, payload); return }
     val frame = byteArrayOf(0) + encodeVarint(payload.size) + encodeVarint(msgType) + payload
     conn.getOutputStream().write(frame)
   }
@@ -1246,6 +1272,7 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
       BluetoothGattProxy.stop() // no client left to read/write/notify through — clean slate on reconnect
       bleSubscribed = false
       activeConn = null
+      noiseCiphers = null
       connectedClientAddress = null
       connectedClientName = null
       conn.close()

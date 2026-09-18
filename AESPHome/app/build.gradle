@@ -82,6 +82,12 @@ dependencies {
   // (no tensorflow-lite-gpu) since the GPU delegate's device/driver compatibility is far less
   // predictable than CPU across the old/low-end Android hardware this project targets.
   implementation 'org.tensorflow:tensorflow-lite-task-vision:0.4.4'
+  // Noise Protocol Framework (ESPHome's encrypted API transport, noise.kt) — a small,
+  // purpose-built pure-Java implementation of the actual protocol state machine (handshake
+  // patterns, symmetric/cipher state, split()), not just raw crypto primitives, so this
+  // doesn't mean hand-rolling the Noise handshake itself. No Maven Central artifact exists;
+  // pinned to a specific commit via JitPack since upstream has no tagged releases.
+  implementation 'com.github.rweather:noise-java:49377b6dfc6a1e75740bce2318118291a57c0d6e'
   testImplementation 'junit:junit:4.13.2'
 }
 

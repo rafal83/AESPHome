@@ -216,6 +216,8 @@ class MainActivity : Activity() {
     }
     layout.addView(appLauncherButton)
 
+    layout.addView(noiseEncryptionCard())
+
     // Grouped by UiSection (Sensor.kt) instead of one flat alphabetical list of 70+ rows —
     // each section renders as its own MaterialCardView. Within each section, components are
     // still sorted alphabetically by label and rendered exactly as before (its enable switch
@@ -386,6 +388,79 @@ class MainActivity : Activity() {
     radius = dp(12).toFloat()
     cardElevation = dp(1).toFloat()
     useCompatPadding = true
+  }
+
+  // App-local transport setting, not an HA entity (an entity reachable only through the
+  // same transport it configures would be circular) — enable switch, the base64 PSK field
+  // (visible, not password-masked: the whole point is copying it into Home Assistant's own
+  // ESPHome integration prompt, same as ESPHome's own dashboard shows it), and a Generate
+  // button. Plaintext connections keep working unconditionally either way — this only ever
+  // adds a second, opt-in way in (see noise.kt's file header for what's and isn't verified).
+  private fun noiseEncryptionCard(): View {
+    val content = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dp(16), dp(16), dp(16), dp(16))
+    }
+    content.addView(TextView(this).apply {
+      text = "API Encryption (Noise)"
+      textSize = 16f
+      setTypeface(typeface, android.graphics.Typeface.BOLD)
+      setPadding(0, 0, 0, dp(4))
+    })
+    content.addView(TextView(this).apply {
+      text = "Optional — wraps the ESPHome API connection in a Noise-encrypted transport " +
+          "instead of plaintext. Not yet verified against a real Home Assistant instance; " +
+          "leave off unless you've confirmed it works for you, and keep the key private."
+      textSize = 12f
+      setTextColor(Color.GRAY)
+      setPadding(0, 0, 0, dp(8))
+    })
+
+    val enableSwitch = MaterialSwitch(this).apply {
+      text = "Enable Noise encryption"
+      isChecked = NoiseEncryptionSettings.isEnabled(this@MainActivity)
+    }
+    content.addView(enableSwitch)
+
+    val keyLayout = TextInputLayout(this).apply {
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        topMargin = dp(8)
+      }
+      hint = "Encryption key (base64)"
+    }
+    val keyInput = TextInputEditText(keyLayout.context).apply {
+      setText(NoiseEncryptionSettings.getPskBase64(this@MainActivity) ?: "")
+      imeOptions = EditorInfo.IME_ACTION_DONE
+    }
+    fun commitKey() {
+      val text = keyInput.text?.toString()?.trim() ?: return
+      if (text.isEmpty()) return
+      NoiseEncryptionSettings.setPskBase64(this@MainActivity, text)
+    }
+    keyInput.setOnEditorActionListener { _, actionId, _ ->
+      if (actionId != EditorInfo.IME_ACTION_DONE) return@setOnEditorActionListener false
+      commitKey(); keyInput.clearFocus(); true
+    }
+    keyInput.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commitKey() }
+    keyLayout.addView(keyInput)
+    content.addView(keyLayout)
+
+    val generateButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+      text = "Generate New Key"
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+        topMargin = dp(8)
+      }
+      setOnClickListener {
+        val generated = generateNoisePsk()
+        keyInput.setText(generated)
+        NoiseEncryptionSettings.setPskBase64(this@MainActivity, generated)
+      }
+    }
+    content.addView(generateButton)
+
+    enableSwitch.setOnCheckedChangeListener { _, checked -> NoiseEncryptionSettings.setEnabled(this, checked) }
+
+    return card().apply { addView(content) }
   }
 
   // Shows this device's own Wi-Fi IP, and — if Home Assistant is currently connected —
