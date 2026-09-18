@@ -294,6 +294,110 @@ by label exactly as before.
   already re-skins correctly under `Theme.Material3.DayNight`) rather than an exposed dropdown
   menu, to keep this pass low-risk.
 
+# Hardening pass: Noise encryption, BLE reliability, update/release security, MJPEG/RTSP auth
+
+A deliberately non-feature-adding pass — the goal was hardening what already existed, not
+growing the feature count further. Full detail (including exactly what was and wasn't
+verified for the security-sensitive pieces) is in `docs/SECURITY.md`; this section is the
+condensed version in the report structure this file already uses.
+
+## Security
+
+- **Noise encryption for the ESPHome API transport** (`noise.kt`) — opt-in, off by default,
+  plaintext untouched. See `docs/SECURITY.md` for the full writeup, including exactly what
+  was checked against ESPHome's own source vs. a library-naming quirk that turned out not to
+  be a protocol difference, and a real handshake round-trip test
+  (`NoiseHandshakeRoundTripTest.kt`) against a second, independent client-role
+  `HandshakeState` over a loopback socket.
+- **Auto-update asset safety**: `isAcceptableUpdateApkName()` rejects any `unsigned`/`debug`
+  release asset unless this app's own build is itself a debug build; a SHA-256 checksum
+  (published by `release.yml`, downloaded and verified before install) is now mandatory for
+  any release that has one; an incomplete download (byte count vs. `Content-Length`) is
+  rejected rather than installed short.
+- **Release signing** (`release.yml`): fails if the tag doesn't match `versionName`; verifies
+  the built APK's signature with `apksigner` when available; computes and publishes a SHA-256
+  checksum next to every release APK; deletes the decoded keystore file unconditionally at
+  the end of the job; marks an unsigned build's release as a prerelease with an explicit
+  warning instead of looking like a normal release; no longer cancels an in-progress release
+  run if a second tag is pushed.
+- **MJPEG/RTSP auth**: MJPEG's existing token check switched to `MessageDigest.isEqual`
+  (was a timing-observable `!=`) and gained `Authorization: Bearer` support alongside the URL
+  token. RTSP gained optional Basic auth (credentials embedded in the shown URL, matching the
+  ffmpeg/VLC/go2rtc convention) — previously had none at all.
+
+## BLE
+
+- **Per-operation timeout**: every GATT operation (read/write/notify-enable/`requestMtu`) now
+  goes through `GattOpQueue` (`gatt_op_queue.kt`), a generic, unit-tested (no Robolectric
+  needed — a fake, manually-advanced clock stands in for a real `Handler`) serial queue with a
+  10s timeout per operation. Android can accept an operation and then never call its
+  callback at all; previously that blocked every later operation on the same connection
+  forever. A callback that finally arrives after its op already timed out is now recognized
+  as stale and ignored, instead of being mistaken for completing whatever op is current by
+  then.
+- **Real MTU negotiation**: `requestMtu(517)` runs through the same queue/timeout right after
+  connecting; success, failure, no callback at all, and a peripheral that doesn't support
+  `requestMtu()` all fall back to the default 23-byte MTU rather than blocking or failing the
+  connection. `BluetoothDeviceConnectionResponse` is now sent once this settles (with
+  whatever MTU actually applies), not immediately on raw connect with a placeholder value.
+
+## Camera
+
+- **Audited, not refactored into a shared pipeline**: confirmed (matching the code's own
+  existing documentation) that ESPHome Camera/MJPEG/person-detection share one Camera2
+  session (`CameraService`'s `ImageReader`), while RTSP opens a fully independent one
+  (`MediaCodec` encoder `Surface`) — see `docs/SECURITY.md` for why merging them wasn't
+  attempted this pass. Added an explicit "camera multi-output unsupported, fallback active"
+  log line when the two collide (`ERROR_CAMERA_IN_USE`), and made `stopEncoder()`
+  `@Synchronized` against the several different callback threads that can call it on a
+  failure path.
+- **MJPEG hardening**: the accept loop's one-`Thread()`-per-client became a bounded
+  `ThreadPoolExecutor` (`MAX_CONCURRENT_CLIENTS = 8`, `SynchronousQueue` — no queueing, an
+  excess client gets an immediate 503 rather than an accepted-but-never-served socket).
+  Stream-viewer count transitions (first connects / last disconnects) are now logged.
+- **RTSP hardening**: fixed a real bug — `respondSetup()`'s socket write was missing the
+  `socketWriteLock` every other response method already used, the exact class of race that
+  lock exists to prevent. Added a bounded session count (`MAX_CONCURRENT_RTSP_SESSIONS = 4`)
+  and a read timeout that applies only before `PLAY` (a read timing out during an active
+  stream is normal — the control channel goes quiet for the whole stream — so it must not
+  tear down a healthy connection).
+
+## CI/CD
+
+- `release.yml`: tag/versionName consistency check, `apksigner verify`, SHA-256 checksum
+  generation and publishing, keystore cleanup, unsigned-build prerelease marking,
+  `cancel-in-progress: false`. See Security above and `docs/SECURITY.md`.
+- `android-build.yml`: unchanged — already had the CI essentials (test + `assembleDebug` +
+  artifact upload, `concurrency` with `cancel-in-progress: true`, which is fine there since
+  cancelling an in-progress *test* run has no partial-publish consequence).
+
+## Tests
+
+47 tests before this pass, 71 after — all still plain Kotlin/JVM, no Robolectric:
+`GattOpQueueTest` (6, including "callback after timeout is ignored, not misapplied to a
+different op"), `AutoUpdateSafetyTest` (7, asset-name safety + checksum parsing),
+`NoiseFramingTest` (7, hand-computed wire-layout bytes), `NoiseHandshakeRoundTripTest` (2, a
+real handshake + a wrong-PSK rejection, both over a real loopback socket), plus one new case
+each in `AutoUpdateVersionTest` (double-digit SemVer comparison) and `MjpegHeadersTest`
+(`tokenMatches`).
+
+## Build
+
+```
+./gradlew clean test assembleDebug
+```
+
+Result: **BUILD SUCCESSFUL**, all 71 unit tests passing, debug APK produced. Release build
+(`./gradlew assembleRelease`) also verified, including the new `apksigner verify` step in CI
+against a real signed output — see the release.yml changes above.
+
+## APK
+
+Signed release APKs are published as GitHub Release assets on
+`github.com/rafal83/AESPHome/releases`, named `AESPHome-<version>-release.apk` with a
+matching `AESPHome-<version>-release.apk.sha256` alongside it as of this pass. The debug
+build's APK path is unchanged: `app/build/outputs/apk/debug/app-debug.apk`.
+
 # Post-release fixes from real-device testing (v0.2.2)
 
 v0.2.1 was the first build actually installed on a device. It surfaced four issues, all
@@ -321,28 +425,31 @@ fixed here:
 
 # Remaining work
 
-- **Bluetooth GATT: pairing, cache clearing, connection-parameter negotiation, MTU
-  negotiation** — see `docs/BLUETOOTH_PROXY.md`'s "What's NOT implemented" section. Connect/
-  discover/read/write/notify all work; these are the parts tied to security material or
-  throughput tuning that don't change whether a basic GATT session works.
-- **RTSP: real-device verification** — implemented, compiles, and the one pure piece of its
-  protocol logic (Annex-B splitting, FU-A header packing) is unit tested, but it was never run
-  against a real camera + real player. See `docs/RTSP_PLAN.md`'s verification section for what
-  to check first if it doesn't play. Also no authentication (unlike MJPEG's token), no
-  RTP-over-UDP, no RTCP.
+As of the hardening pass below (Noise encryption, BLE GATT timeout/MTU, auto-update/release
+signing hardening, MJPEG/RTSP hardening+auth) this list has shrunk considerably — see that
+section for what moved from here to "done." What's left:
+
+- **Bluetooth GATT: pairing, cache clearing, connection-parameter negotiation** — see
+  `docs/BLUETOOTH_PROXY.md`'s "What's NOT implemented" section. Connect/discover/read/write/
+  notify, MTU negotiation, and per-operation timeouts all work now; these remaining three are
+  the parts tied to security material or fine connection tuning that don't change whether a
+  basic GATT session works.
+- **RTSP and Noise: real-device/real-client verification** — both compile, both pass their
+  own unit/round-trip tests, but neither was exercised against the actual reference client it
+  matters most against (a real player for RTSP, a real Home Assistant instance for Noise) —
+  no camera-equipped device or live HA instance was available while building either. See
+  `docs/RTSP_PLAN.md` and `docs/SECURITY.md` for exactly what was and wasn't verified for each.
 - **Person detection: only "person" from a general 91-class COCO model** — no dedicated
   face/pose model, no per-region-of-interest configuration, no drawing of bounding boxes back
   onto the MJPEG/RTSP stream (the detection result is a plain HA sensor, not an overlay).
-- **Noise/encrypted ESPHome API transport** — audited, not implemented. The server currently
-  only speaks the plaintext preamble (`0x00`); it never sends or accepts a Noise (`0x01`)
-  frame. Implementing ESPHome's Noise handshake correctly means a full Noise_NNpsk0
-  implementation (X25519 + ChaCha20-Poly1305 + a specific handshake pattern/transcript) —
-  materially higher risk of a subtly wrong, silently-insecure implementation than every other
-  change in this pass, and large enough to be its own dedicated effort with its own security
-  review rather than one part of a much broader feature branch. Recommendation: adopt a
-  vetted Noise library (e.g. a Java/Kotlin `Noise_NNpsk0_25519_ChaChaPoly_SHA256` implementation)
-  rather than hand-rolling the cryptography, and land it as its own change with its own
-  focused review.
+- **Per-ABI split APKs** — audited, not built; see `docs/SECURITY.md`'s "what was explicitly
+  not attempted" section for why (P2 priority, and the feature's own spec explicitly permits
+  keeping a single universal APK if per-ABI auto-update selection would add too much
+  complexity for the benefit).
+- **A unified CameraPipeline abstraction across ESPHome Camera/MJPEG/RTSP/TFLite** — audited,
+  not implemented; see `docs/SECURITY.md` for the reasoning (merging two independent,
+  already-working Camera2 sessions was judged a bigger risk than the status quo's documented,
+  gracefully-handled exclusivity).
 - **Foreground service type live updates** — see the Android version limitations note above.
 
 # Build

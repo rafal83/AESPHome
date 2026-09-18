@@ -27,6 +27,11 @@ ESPHome integration — you don't need to install anything on the Home Assistant
 More background questions (supported Android versions, permissions, why the APK is this
 large, why the MAC address looks made up) are answered in the [FAQ](FAQ.md).
 
+The API connection is plaintext by default (same as always) with an opt-in Noise-encrypted
+transport available from the main screen; the MJPEG/RTSP feeds each have their own optional
+auth. See `AESPHome/docs/SECURITY.md` for exactly what's implemented and, importantly, what
+has and hasn't been verified against a real Home Assistant instance.
+
 ---
 
 ## Features
