@@ -219,30 +219,29 @@ class MainActivity : Activity() {
     layout.addView(noiseEncryptionCard())
 
     // Grouped by UiSection (Sensor.kt) instead of one flat alphabetical list of 70+ rows —
-    // each section renders as its own MaterialCardView. Within each section, components are
-    // still sorted alphabetically by label and rendered exactly as before (its enable switch
-    // immediately followed by that component's own settings/select-settings, indented
-    // underneath it). Still built entirely from registry metadata: a new Sensor/Service/
-    // Setting needs no changes here to show up correctly grouped, as long as its id is mapped
-    // in Sensor.kt's UI_SECTION_BY_ID (anything missing there falls back to "Other" rather
-    // than being dropped).
+    // each section is a collapsible (accordion-style) MaterialCardView: tapping its header
+    // toggles the whole section's content, so the screen reads as a short list of section
+    // names rather than every single setting for every feature at once. A section starts
+    // expanded only if at least one of its components is currently enabled — collapsed
+    // otherwise — so what's actually active is visible without any taps, while everything
+    // else stays out of the way until asked for. Still built entirely from registry
+    // metadata: a new Sensor/Service/Setting needs no changes here to show up correctly
+    // grouped, as long as its id is mapped in Sensor.kt's UI_SECTION_BY_ID (anything missing
+    // there falls back to "Other" rather than being dropped).
     val sections = Sensors.toggleables.groupBy { it.uiSection }
     val orderedSections = UiSection.entries.filter { sections.containsKey(it) }
     for (section in orderedSections) {
-      val sectionLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(16), dp(16), dp(16))
-      }
-      sectionLayout.addView(TextView(this).apply {
-        text = section.label
-        textSize = 16f
-        setTypeface(typeface, android.graphics.Typeface.BOLD)
-        setPadding(0, 0, 0, dp(4))
-      })
-
       val groups = sections.getValue(section).sortedBy { it.label }
+      val startExpanded = groups.any { isEnabled(this, it) }
+
+      val sectionContent = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), 0, dp(16), dp(16))
+        visibility = if (startExpanded) View.VISIBLE else View.GONE
+      }
+
       for ((index, component) in groups.withIndex()) {
-        if (index != 0) sectionLayout.addView(MaterialDivider(this).apply {
+        if (index != 0) sectionContent.addView(MaterialDivider(this).apply {
           layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             topMargin = dp(8); bottomMargin = dp(8)
           }
@@ -262,13 +261,12 @@ class MainActivity : Activity() {
             setPadding(dp(4), 0, 0, 0)
           })
         }
-        sectionLayout.addView(header)
+        sectionContent.addView(header)
 
-        val childRows = component.settings.filter { it.deviceUi }.map { settingRow(it) } +
-                        component.selectSettings.filter { it.deviceUi }.map { selectSettingRow(it) }
+        val childRows = componentChildRows(component)
         // Hidden rather than greyed out while the toggle is off — its settings don't do
         // anything until it's back on, so there's nothing useful to show in the meantime.
-        childRows.forEach { sectionLayout.addView(it); it.visibility = if (switch.isChecked) View.VISIBLE else View.GONE }
+        childRows.forEach { sectionContent.addView(it); it.visibility = if (switch.isChecked) View.VISIBLE else View.GONE }
 
         switch.setOnCheckedChangeListener { _, checked ->
           setEnabled(this, component, checked)
@@ -285,7 +283,7 @@ class MainActivity : Activity() {
         // operator's ability to force one right now. Left enabled/disabled state on the button
         // is the only feedback while the network call runs; the Toast reports the outcome.
         if (component === AutoUpdateService) {
-          sectionLayout.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+          sectionContent.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             text = "Check for Updates Now"
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
               topMargin = dp(8)
@@ -312,7 +310,38 @@ class MainActivity : Activity() {
         }
       }
 
-      layout.addView(card().apply { addView(sectionLayout) })
+      val chevron = TextView(this).apply {
+        text = if (startExpanded) "▾" else "▸"
+        textSize = 18f
+        setPadding(dp(8), 0, 0, 0)
+      }
+      val headerRow = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(16), dp(16), dp(16), dp(16))
+        isClickable = true
+        isFocusable = true
+        addView(TextView(this@MainActivity).apply {
+          text = section.label
+          textSize = 16f
+          setTypeface(typeface, android.graphics.Typeface.BOLD)
+          layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        addView(chevron)
+        setOnClickListener {
+          val expand = sectionContent.visibility != View.VISIBLE
+          sectionContent.visibility = if (expand) View.VISIBLE else View.GONE
+          chevron.text = if (expand) "▾" else "▸"
+        }
+      }
+
+      layout.addView(card().apply {
+        addView(LinearLayout(this@MainActivity).apply {
+          orientation = LinearLayout.VERTICAL
+          addView(headerRow)
+          addView(sectionContent)
+        })
+      })
     }
 
     // Entity-affecting changes (toggles, lens/resolution picks, etc.) only take effect in
@@ -479,6 +508,32 @@ class MainActivity : Activity() {
     val mjpegLine = if (isEnabled(this, MjpegServerService)) "MJPEG: ${MjpegServerService.url(this) ?: "starting..."}" else null
     val rtspLine = if (isEnabled(this, RtspServerService)) "RTSP: ${RtspServerService.url(this) ?: "starting..."}" else null
     mjpegStatusText?.text = listOfNotNull(mjpegLine, rtspLine).joinToString("\n")
+  }
+
+  // Builds one component's settings/select-settings rows, clustering any that share a
+  // non-null Setting.group/SelectSetting.group (e.g. RTSP's port+bitrate under "Connection",
+  // its auth toggle under "Authentication") under a small sub-header, in first-seen group
+  // order — e.g. RtspServerService.settings/selectSettings puts "Connection" before
+  // "Authentication" simply because portSetting/bitrateSetting are declared before
+  // authSetting. Ungrouped settings (group == null, the default — most of them) render
+  // first, flat, exactly as before this existed.
+  private fun componentChildRows(component: Toggleable): List<View> {
+    val labeled = component.settings.filter { it.deviceUi }.map { it.group to settingRow(it) } +
+                  component.selectSettings.filter { it.deviceUi }.map { it.group to selectSettingRow(it) }
+
+    val rows = mutableListOf<View>()
+    labeled.filter { it.first == null }.forEach { rows.add(it.second) }
+    for ((groupName, groupRows) in labeled.filter { it.first != null }.groupBy({ it.first!! }, { it.second })) {
+      rows.add(TextView(this).apply {
+        text = groupName
+        textSize = 13f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setTextColor(Color.DKGRAY)
+        setPadding(dp(32), dp(8), 0, dp(2))
+      })
+      rows.addAll(groupRows)
+    }
+    return rows
   }
 
   // One indented floating-label numeric field for a Setting, wired to persist on commit and

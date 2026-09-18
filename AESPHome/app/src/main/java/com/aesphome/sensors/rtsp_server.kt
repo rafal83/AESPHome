@@ -90,12 +90,12 @@ object RtspServerService : Service {
   val portSetting = Setting(
       id = "rtsp_port", label = "RTSP Port", default = 8554f, min = 1024f, max = 65535f, step = 1f,
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
-      enabledByDefaultHa = false, icon = "mdi:lan-connect")
+      enabledByDefaultHa = false, icon = "mdi:lan-connect", group = "Connection")
 
   val bitrateSetting = Setting(
       id = "rtsp_bitrate_kbps", label = "RTSP Bitrate (kbps)", default = 1500f, min = 250f, max = 8000f, step = 250f,
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
-      enabledByDefaultHa = false, icon = "mdi:speedometer")
+      enabledByDefaultHa = false, icon = "mdi:speedometer", group = "Connection")
 
   // Not exposed to HA on purpose — same reasoning as MJPEG's authSetting (mjpeg_server.kt):
   // letting any HA user remotely disable the one thing gating access to a raw camera feed
@@ -107,7 +107,7 @@ object RtspServerService : Service {
   val authSetting = SelectSetting(
       id = "rtsp_require_auth", label = "RTSP Require Auth", options = listOf("Disabled", "Enabled"),
       default = "Disabled", deviceUi = true, homeAssistant = false, entityCategory = EntityCategory.CONFIG,
-      icon = "mdi:key-outline")
+      icon = "mdi:key-outline", group = "Authentication")
 
   // No resolution setting of its own — streams whatever CameraService's currently-selected
   // lens/resolution already is (CameraService.selectedResolution()), same "one camera, one

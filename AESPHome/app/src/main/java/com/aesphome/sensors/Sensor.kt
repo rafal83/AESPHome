@@ -65,6 +65,11 @@ class Setting(
     val enabledByDefaultHa: Boolean = true,
     val icon: String = "", // MDI icon override, e.g. "mdi:volume-high"; empty lets HA pick its own default
     val onChanged: ((Context) -> Unit)? = null, // fires after every persisted change, from setSetting()
+    // Purely a device-UI display hint (never sent to HA, which has no matching concept) —
+    // settings/selectSettings sharing the same non-null group render together under one
+    // sub-header within their owning component's row in MainActivity, instead of one flat
+    // list. Null (the default) renders ungrouped, exactly as before this existed.
+    val group: String? = null,
 ) {
   val key: Int = id.hashCode() // ESPHome wire-protocol entity key — derived so it never needs manual tracking
 }
@@ -91,6 +96,8 @@ class SelectSetting(
     // CameraService's lens/rotation/resolution dropdowns use this to invalidate a running
     // stream. Not called on the onCommand path above, since nothing is persisted there.
     val onChanged: ((Context) -> Unit)? = null,
+    // Same device-UI-only grouping hint as Setting.group — see its doc comment.
+    val group: String? = null,
 ) {
   init { require(default in options) { "SelectSetting '$id': default '$default' is not one of $options" } }
 
@@ -256,7 +263,10 @@ object Sensors {
     AppLauncherService,
     PersonDetectorService,
     RtspServerService,
-    AutoUpdateService
+    // NOT AutoUpdateService here — it's already in `updates` below, and toggleables (built
+    // from every list in this object, including both of these) would otherwise contain it
+    // twice, rendering two duplicate "AESPHome Firmware" rows (two switches, two copies of
+    // its settings, two "Check for Updates Now" buttons) in MainActivity.
   )
 
 

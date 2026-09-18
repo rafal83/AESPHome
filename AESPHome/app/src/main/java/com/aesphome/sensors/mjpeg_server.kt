@@ -87,19 +87,19 @@ object MjpegServerService : Service {
   val portSetting = Setting(
       id = "mjpeg_port", label = "MJPEG Port", default = 8080f, min = 1024f, max = 65535f, step = 1f,
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
-      enabledByDefaultHa = false, icon = "mdi:lan-connect")
+      enabledByDefaultHa = false, icon = "mdi:lan-connect", group = "Connection")
 
   val fpsSetting = Setting(
       id = "mjpeg_max_fps", label = "MJPEG Max FPS", default = 5f, min = 1f, max = 30f, step = 1f,
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
-      enabledByDefaultHa = false, icon = "mdi:speedometer")
+      enabledByDefaultHa = false, icon = "mdi:speedometer", group = "Connection")
 
   // Not exposed to HA on purpose — letting any HA user remotely disable the one thing
   // gating access to a raw camera feed defeats the point of it being configurable at all.
   val authSetting = SelectSetting(
       id = "mjpeg_require_token", label = "MJPEG Require Token", options = listOf("Enabled", "Disabled"),
       default = "Enabled", deviceUi = true, homeAssistant = false, entityCategory = EntityCategory.CONFIG,
-      icon = "mdi:key-outline")
+      icon = "mdi:key-outline", group = "Authentication")
 
   override val settings: List<Setting> = listOf(portSetting, fpsSetting)
   override val selectSettings: List<SelectSetting> = listOf(authSetting)
