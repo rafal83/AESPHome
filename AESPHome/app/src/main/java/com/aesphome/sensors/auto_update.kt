@@ -116,7 +116,12 @@ object AutoUpdateService : Service, UpdateEntity {
   override fun onCheckCommand(context: Context) = checkNow(context)
   override fun onUpdateCommand(context: Context) = downloadAndInstall(context)
 
-  fun checkNow(context: Context) {
+  // `onResult`, when given, is invoked with the resulting UpdateState (or null on failure —
+  // network error, non-200 response, unparseable release) — used by MainActivity's manual
+  // "Check for Updates Now" button to show immediate feedback, in addition to the state always
+  // being pushed to HA via pushUpdateState() below. Runs its network call on the calling
+  // thread (blocking), same as before this parameter was added — callers off the main thread.
+  fun checkNow(context: Context, onResult: ((UpdateState?) -> Unit)? = null) {
     try {
       val connection = (URL(GITHUB_API_URL).openConnection() as HttpURLConnection).apply {
         requestMethod = "GET"
@@ -127,6 +132,7 @@ object AutoUpdateService : Service, UpdateEntity {
       val body = try {
         if (connection.responseCode != 200) {
           Log.e(TAG, "Auto update: GitHub API returned ${connection.responseCode}")
+          onResult?.invoke(null)
           return
         }
         connection.inputStream.bufferedReader().use { it.readText() }
@@ -136,7 +142,10 @@ object AutoUpdateService : Service, UpdateEntity {
 
       val json = JSONObject(body)
       val latestTag = json.optString("tag_name", "")
-      if (latestTag.isEmpty()) return
+      if (latestTag.isEmpty()) {
+        onResult?.invoke(null)
+        return
+      }
       val releaseUrl = json.optString("html_url", "")
 
       val isNewer = compareVersions(latestTag, currentVersion) > 0
@@ -158,13 +167,16 @@ object AutoUpdateService : Service, UpdateEntity {
 
       // latestVersion reported as the current one when nothing newer was found — HA's update
       // entity shows "up to date" exactly when these two are equal.
-      AESPHomeService.instance?.pushUpdateState(this, UpdateState(
+      val state = UpdateState(
         currentVersion = currentVersion,
         latestVersion = if (isNewer) latestTag else currentVersion,
         releaseUrl = if (isNewer) releaseUrl else "",
-      ))
+      )
+      AESPHomeService.instance?.pushUpdateState(this, state)
+      onResult?.invoke(state)
     } catch (e: Exception) {
       Log.e(TAG, "Auto update: check failed: ${e.message}")
+      onResult?.invoke(null)
     }
   }
 

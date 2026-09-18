@@ -275,6 +275,39 @@ class MainActivity : Activity() {
           }
           childRows.forEach { it.visibility = if (checked) View.VISIBLE else View.GONE }
         }
+
+        // A concrete reference (not a generic Toggleable/UpdateEntity hook) since there is
+        // exactly one update entity today — same pattern as MjpegServerService/RtspServerService
+        // being referenced directly elsewhere in this Activity. Runs independently of the
+        // switch above: the switch only governs the periodic background check, not the
+        // operator's ability to force one right now. Left enabled/disabled state on the button
+        // is the only feedback while the network call runs; the Toast reports the outcome.
+        if (component === AutoUpdateService) {
+          sectionLayout.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Check for Updates Now"
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+              topMargin = dp(8)
+            }
+            setOnClickListener {
+              isEnabled = false
+              text = "Checking..."
+              Thread({
+                AutoUpdateService.checkNow(applicationContext) { state ->
+                  runOnUiThread {
+                    isEnabled = true
+                    text = "Check for Updates Now"
+                    val message = when {
+                      state == null -> "Update check failed — see logs"
+                      state.latestVersion != state.currentVersion -> "Update available: ${state.latestVersion}"
+                      else -> "Up to date (${state.currentVersion})"
+                    }
+                    android.widget.Toast.makeText(this@MainActivity, message, android.widget.Toast.LENGTH_LONG).show()
+                  }
+                }
+              }, "AESPHomeManualUpdateCheck").start()
+            }
+          })
+        }
       }
 
       layout.addView(card().apply { addView(sectionLayout) })
