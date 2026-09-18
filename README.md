@@ -106,12 +106,13 @@ cameras:
 
 A direct `rtsp://<device-ip>:8554/aesphome` H.264 stream is also implemented (Camera2 →
 MediaCodec → RTP-over-TCP, always at the camera's own selected resolution — there's no
-separate RTSP resolution setting) — see `AESPHome/docs/RTSP_PLAN.md`. **It cannot run at the
-same time as Camera, MJPEG, or Person Detection** — RTSP always targets the same physical
-camera those use, and on real hardware that contention doesn't fail cleanly; it silently
-starves RTSP's encoder of real frames until it errors out a few seconds in. Disable those
-three while using RTSP, and vice versa; RtspServerService now refuses to start (with a clear
-log line) rather than failing confusingly if it detects the conflict.
+separate RTSP resolution setting) — see `AESPHome/docs/RTSP_PLAN.md`. Verified working
+end-to-end against a real VLC player on real hardware. **It cannot run at the same time as
+Camera, MJPEG, or Person Detection** — RTSP always targets the same physical camera those
+use, and on real hardware that contention doesn't fail cleanly; it silently starves RTSP's
+encoder of real frames until it errors out a few seconds in. Disable those three while using
+RTSP, and vice versa; `RtspServerService` refuses to start (with a clear log line) rather
+than failing confusingly if it detects the conflict.
 
 Person detection runs a small on-device model (EfficientDet-Lite0, bundled, CPU-only,
 ~4.3MB) against the camera feed — no image or video data leaves the device. It's a genuinely

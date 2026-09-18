@@ -1,6 +1,16 @@
 # H.264 / RTSP
 
-## Status: real-device root cause confirmed and fixed (v2026.9.1)
+## Status: real-device root cause confirmed and fixed (v2026.9.2) — verified working
+
+Verified end to end on the real device (v2026.9.2): with Camera/MJPEG/Person Detection
+enabled, RTSP now refuses to start immediately with a clear log line instead of dying
+silently ~10s in (confirmed via VLC + `adb logcat`, both showing the fast, explained
+failure). With Camera/MJPEG/Person Detection disabled and only RTSP Server enabled, a
+20-second `vlc --rtsp-tcp` session played with **zero errors, zero warnings, no
+disconnect** — both in VLC's own log and in `adb logcat` (no camera/encoder error of any
+kind). This is the first time in this project's history RTSP has been confirmed actually
+working against a real player on real hardware, not just "compiles and passes its own unit
+tests."
 
 Continuing the diagnosis below: with the improved drain-loop logging shipped in v2026.9.1
 (exception type + full stack trace, not just a swallowed/unlogged catch), the exact failure

@@ -39,23 +39,21 @@ import kotlin.random.Random
     a minimal hand-rolled RTSP control server (OPTIONS/DESCRIBE/SETUP/PLAY/TEARDOWN only — no
     PAUSE/seeking, this is a live proxy, not VOD).
 
-    IMPORTANT — unlike every other feature in this codebase, this one could not be verified
-    against a real player (VLC/ffplay/go2rtc) in the environment this was built in: there was
-    no camera-equipped Android device available to run it on. The protocol-level pieces (RTP
-    header layout, FU-A fragmentation, Annex-B NAL splitting, SDP fmtp line) were written
-    carefully against RFC 6184 / RFC 2326, and it compiles and the surrounding app builds/
-    tests pass, but "compiles" is not the same claim as "a real player successfully decodes
-    the stream." Treat this as needing a real-device smoke test (see docs/RTSP_PLAN.md's
-    verification notes) before relying on it.
+    Verified end to end against a real player (VLC, --rtsp-tcp, 20s with zero errors) on real
+    hardware as of v2026.9.2 — see docs/RTSP_PLAN.md's changelog for the full real-device
+    diagnosis that got it there, including the one real bug that made every earlier attempt
+    fail (below).
 
     Separate camera session from CameraService's JPEG pipeline (unlike MJPEG, which reuses it)
     — Camera2 does support a JPEG ImageReader and an encoder Surface as simultaneous outputs of
     one session, but sharing one was judged a bigger risk to the already-working JPEG/MJPEG
-    path than opening the camera a second time here. Android's own camera framework already
-    enforces exclusivity (CameraDevice.StateCallback.onError with ERROR_CAMERA_IN_USE) if RTSP
-    and Camera/MJPEG try to use the same physical lens at once — handled the same way
-    CameraService handles any other open failure (logged, reported cleanly, no crash), not a
-    new failure mode this file has to invent.
+    path than opening the camera a second time here. This means RTSP cannot run at the same
+    time as Camera/MJPEG/Person Detection: confirmed on real hardware that Android's camera
+    framework does NOT always fail this cleanly (no immediate ERROR_CAMERA_IN_USE in every
+    case) — instead the second session can open "successfully" while its encoder input
+    Surface never actually receives a frame, and the hardware encoder errors out confusingly
+    ~10s later. startEncoder() below now checks for this and refuses to start at all (logging
+    why) rather than relying on Android to fail cleanly on its own.
 
 */
 
