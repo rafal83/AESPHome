@@ -738,7 +738,9 @@ internal class RtspSession(private val server: RtspServerService, private val co
 // binary_sensor.rtsp_server_running — same externally-driven pattern as MjpegServerRunningSensor.
 object RtspServerRunningSensor : EventSensor {
   override val id                     = "rtsp_server_running"
-  override val label                  = "RTSP Server"
+  // Was "RTSP Server" — identical to RtspServerService.label, same fix as
+  // MjpegServerRunningSensor (mjpeg_server.kt) for the same reason.
+  override val label                  = "RTSP Server Running"
   override val description            = ""
   override val key: Int               = id.hashCode()
   override fun kind(context: Context) = SensorKind.Binary()

@@ -293,7 +293,10 @@ object MjpegServerService : Service {
 // MjpegServerService.acceptLoop/stop) rather than owning a start()/stop() lifecycle.
 object MjpegServerRunningSensor : EventSensor {
   override val id                     = "mjpeg_server_running"
-  override val label                  = "MJPEG Server"
+  // Was "MJPEG Server" — identical to MjpegServerService.label, so both this read-only
+  // status sensor and the actual enable/disable Service row showed up as two
+  // indistinguishable-looking "MJPEG Server" switches in MainActivity's accordion.
+  override val label                  = "MJPEG Server Running"
   override val description            = ""
   override val key: Int               = id.hashCode()
   override fun kind(context: Context) = SensorKind.Binary()
