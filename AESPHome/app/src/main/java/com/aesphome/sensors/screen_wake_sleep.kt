@@ -61,6 +61,11 @@ object ScreenWakeButton : Button {
   override val enabledByDefaultHa  = true
   override val icon                = "mdi:cellphone-arrow-down"
 
+  // Wakes the screen only — deliberately does NOT bring AESPHome to the foreground. An
+  // earlier version did (per the original request to "bring the app forward if allowed"),
+  // but real-device testing showed that's unwanted: it steals focus from whatever the user
+  // was actually doing just to turn the screen on, which isn't what a "wake screen" button
+  // should do (compare: pressing a phone's power button wakes it without launching anything).
   override fun press(context: Context) {
     val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
     @Suppress("DEPRECATION")
@@ -69,15 +74,6 @@ object ScreenWakeButton : Button {
         "AESPHome:screenWake")
     wakeLock.acquire(WAKE_DURATION_MS) // self-releasing — never held past this, even if release() below never runs
     Log.i(TAG, "Screen wake requested")
-
-    try {
-      val intent = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      context.startActivity(intent)
-    } catch (e: Exception) {
-      // Android 10+ can refuse a background-started Activity outright depending on device
-      // state — the WakeLock above still turned the screen on either way.
-      Log.e(TAG, "Could not bring ÆSPHome to the foreground", e)
-    }
   }
 }
 

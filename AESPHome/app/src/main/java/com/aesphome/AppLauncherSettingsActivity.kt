@@ -1,9 +1,9 @@
 package com.aesphome
 
 import android.app.Activity
-import android.content.Intent
-import android.content.pm.PackageManager
+import android.content.pm.LauncherApps
 import android.os.Bundle
+import android.os.Process
 import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -37,11 +37,14 @@ class AppLauncherSettingsActivity : Activity() {
       setPadding(0, 0, 0, dp(16))
     })
 
-    val pm = packageManager
-    val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-    val apps = pm.queryIntentActivities(launcherIntent, PackageManager.MATCH_DEFAULT_ONLY)
-        .distinctBy { it.activityInfo.packageName }
-        .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+    // LauncherApps (not PackageManager.queryIntentActivities) — the API real launcher apps
+    // use to enumerate launchable apps; queryIntentActivities(MATCH_DEFAULT_ONLY) was found to
+    // miss some real apps in practice (e.g. ones whose launcher activity doesn't also declare
+    // the DEFAULT category, which that flag additionally requires).
+    val launcherApps = getSystemService(LauncherApps::class.java)
+    val apps = launcherApps.getActivityList(null, Process.myUserHandle())
+        .distinctBy { it.applicationInfo.packageName }
+        .map { it.applicationInfo.packageName to it.label.toString() }
         .sortedBy { it.second.lowercase() }
 
     val allowed = AppLauncherService.allowedPackages(this).toMutableSet()

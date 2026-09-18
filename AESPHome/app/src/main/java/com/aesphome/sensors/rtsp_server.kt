@@ -164,7 +164,17 @@ object RtspServerService : Service {
     if (!streaming) startEncoder(context)
   }
 
-  internal fun sdpBody(): String? {
+  // DESCRIBE is always the client's FIRST request (before SETUP/PLAY) — the encoder has to
+  // already be running and have produced SPS/PPS by the time this returns, or every session
+  // fails at the very first step with no SDP to offer. Starts the encoder here too (not just
+  // on PLAY) and polls briefly for SPS/PPS to appear, since opening the camera and getting the
+  // first codec-config buffer out of MediaCodec isn't instant.
+  internal fun sdpBody(context: Context): String? {
+    if (!streaming) startEncoder(context)
+    val deadline = System.currentTimeMillis() + 4000L
+    while ((spsNal == null || ppsNal == null) && System.currentTimeMillis() < deadline) {
+      try { Thread.sleep(100) } catch (e: InterruptedException) { return null }
+    }
     val sps = spsNal ?: return null
     val pps = ppsNal ?: return null
     val profileLevelId = "%02x%02x%02x".format(sps.getOrElse(1) { 0 }, sps.getOrElse(2) { 0 }, sps.getOrElse(3) { 0 })
@@ -372,7 +382,7 @@ internal class RtspSession(private val server: RtspServerService, private val co
         when (requestLine.substringBefore(" ")) {
           "OPTIONS" -> respond(cseq, "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n")
           "DESCRIBE" -> {
-            val sdp = server.sdpBody()
+            val sdp = server.sdpBody(context)
             if (sdp == null) respondError(cseq, 503, "Service Unavailable") else respondWithBody(cseq, sdp)
           }
           "SETUP" -> respondSetup(cseq)

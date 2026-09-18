@@ -1,6 +1,7 @@
 package com.aesphome
 
 import android.app.AppOpsManager
+import android.content.ComponentName
 import android.content.Context
 import android.os.Build
 import android.os.Process
@@ -79,6 +80,17 @@ fun macStringToLong(mac: String): Long? {
     result = (result shl 8) or byte.toLong()
   }
   return result
+}
+
+// Accessibility services have no runtime-permission-style grant — the only way to enable one
+// is the user manually flipping it on in Settings > Accessibility, and the only way to check
+// its status is reading the colon-separated list Android keeps of every currently-enabled
+// service. Shared by TouchSensor's requirement (screen_touch.kt) and the Permissions screen's
+// status row for it.
+fun isAccessibilityServiceEnabled(context: Context, service: Class<*>): Boolean {
+  val expected = ComponentName(context, service).flattenToString()
+  val enabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+  return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
 }
 
 // Usage Access ("PACKAGE_USAGE_STATS") is a special app-op permission with no runtime

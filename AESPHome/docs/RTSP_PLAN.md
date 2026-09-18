@@ -1,5 +1,17 @@
 # H.264 / RTSP
 
+## Status: implemented, one real-device bug found and fixed (v0.2.2)
+
+Real-device testing (v0.2.1) reported RTSP not working while MJPEG worked fine on the same
+build. Root cause: `DESCRIBE` — always a client's *first* request, before `SETUP`/`PLAY` —
+required `spsNal`/`ppsNal` to already exist, but those are only produced once the encoder is
+running, and the encoder was only started in reaction to `PLAY`. Every session failed at the
+first step with a 503, before the encoder had ever been given a chance to start. Fixed:
+`DESCRIBE`'s handler now starts the encoder itself (if not already running) and polls up to
+4s for SPS/PPS to appear before responding, instead of requiring `PLAY` to have already
+happened. Untested claims below are otherwise unchanged — this fix addresses a control-flow
+bug, not the packetization/transport-negotiation questions still open.
+
 ## Status: implemented, NOT verified against a real player
 
 `rtsp_server.kt` implements the architecture this document originally proposed (kept below,

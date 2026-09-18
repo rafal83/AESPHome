@@ -223,6 +223,31 @@ requested automatically.
   check still compiles and behaves correctly on `minSdk` 22 — it simply never matches on
   older OSes, which is correct (no such source exists there).
 
+# Post-release fixes from real-device testing (v0.2.2)
+
+v0.2.1 was the first build actually installed on a device. It surfaced four issues, all
+fixed here:
+
+- **RTSP didn't work at all (MJPEG did)**: a real control-flow bug, not an unverified
+  assumption — `DESCRIBE` needed SPS/PPS that only existed after `PLAY` started the encoder,
+  but `DESCRIBE` always arrives *before* `PLAY`. Every session failed at the first step. Fixed
+  in `rtsp_server.kt`: `DESCRIBE` now starts the encoder itself and polls (up to 4s) for
+  SPS/PPS before responding. See `docs/RTSP_PLAN.md`.
+- **`button.screen_wake` pulled AESPHome to the foreground**: intentional in the original
+  design (matching the initial request to bring the app forward), but real usage showed it's
+  unwanted — a "wake screen" action shouldn't steal focus from whatever the user was doing,
+  the same way pressing a phone's power button doesn't launch anything. Removed the
+  `startActivity()` call; the button now only wakes the screen.
+- **`binary_sensor.screen_touch` never activated**: not a bug in the sensor itself —
+  `TouchAccessibilityService` requires a manual grant in Android's Accessibility settings that
+  had no discoverable path in this app (the Permissions screen didn't have a row for it).
+  Added one (`isAccessibilityServiceEnabled()` in `utils.kt`, checked against
+  `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES`).
+- **Allowed Apps list was missing some real apps**: `PackageManager.queryIntentActivities(...,
+  MATCH_DEFAULT_ONLY)` excludes any launcher activity that doesn't also declare the `DEFAULT`
+  category, which some real apps' launcher activities don't. Switched to `LauncherApps`
+  (`AppLauncherSettingsActivity.kt`) — the API real launcher apps use for exactly this.
+
 # Remaining work
 
 - **Bluetooth GATT: pairing, cache clearing, connection-parameter negotiation, MTU

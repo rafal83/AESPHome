@@ -79,6 +79,10 @@ class PermissionsActivity : Activity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) requestRuntime(Manifest.permission.POST_NOTIFICATIONS)
           }),
 
+      PermissionRow("Accessibility Service (Screen Touch)",
+          { if (isAccessibilityServiceEnabled(this, TouchAccessibilityService::class.java)) PermissionStatus.GRANTED else PermissionStatus.DENIED },
+          { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }),
+
       PermissionRow("Usage Access",
           { if (hasUsageAccess(this)) PermissionStatus.GRANTED else PermissionStatus.DENIED },
           { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }),
