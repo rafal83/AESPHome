@@ -1,158 +1,48 @@
-
 # ÆSPHome
+
 <img width="438" height="320" alt="Main Image" src="https://github.com/user-attachments/assets/4022084f-d793-497c-9eac-ec22fc399b92" />
 
 [![Android Build](https://github.com/rafal83/AESPHome/actions/workflows/android-build.yml/badge.svg)](https://github.com/rafal83/AESPHome/actions/workflows/android-build.yml)
 
- 
- Android Simulating ESPHome Device for use with Home Assistant
- 
----
-Work in Progress
----
-Featuring 
----
-* Media Player
-* Bluetooth Speaker
-* Camera
-* Other Stuff!
+Android Simulating ESPHome Device for use with Home Assistant.
 
-Does it work?
----
-Yes. sorta.
+*Work in progress.*
 
-Is it ESPHome?
----
-No. sorta.
+## What is it?
 
-What is it?
----
-It's an Android app that looks to Home Assistant like an ESPHome device.
+It's an Android app that looks to Home Assistant like an ESPHome device:
 
-Do I need to install anything?
----
-Just the app on an old Android device.
-Home Assistant detects it automatically through the ESPHome integration.
+```
+Android  →  ESPHome Native API  →  Home Assistant
+```
 
-You do not need to install anything to Home Assistant.
+**Does it work?** Yes. Sorta.
+**Is it ESPHome?** No. Sorta.
 
-What about...
----
-[FAQ](FAQ.md)
+## Do I need to install anything?
+
+Just the app on an old Android device. Home Assistant detects it automatically through the
+ESPHome integration — you don't need to install anything on the Home Assistant side.
+
+More background questions (supported Android versions, permissions, why the APK is this
+large, why the MAC address looks made up) are answered in the [FAQ](FAQ.md).
 
 ---
 
-Features
----
-* Controls
-  * Enable / Disable Bluetooth
-    * May required "Nearby Devices" / Bluetooth permissions
-  * Connect / Disconnect to paired Bluetooth Speakers
-    * Trigger a connection or disconnection from a known Bluetooth Speaker
-    * May required "Nearby Devices" / Bluetooth permissions
-  * Media Player
-    * Backed by VLC library
-    * Audio Only at the moment
-  * System Volume
-    * Adjust the system volume
- * Sensors
-   * Ambient Noise in dB
-     * Estimate ambient sound levels with microphone
-     * Requires Microphone Permissions
-   * Camera
-      * Stills
-      * Streaming Video
-      * Requires Camera Permissions
-   * Device Movement
-      * Is the device at rest, or moving
-   * Device Orientation
-      * Is the device oriented at 0°, 90°, 180°, 270°
-   * LUX (Camera)
-       * LUX estimated from camera still shots
-   * LUX (Sensor)
-      * LUX reported from devices light sensor (if exists)
-   * Screen On
-     * Is the screen currently on or off
-   * Screen Touch
-     * Is the screen being used at this moment.
-     * Requires Accessibility Service enabled
+## Features
 
- * Configuration 
-   * Camera resolution (per lens)
-   * Camera rotation (per lens)
-   * Camera Effect
-     * Effects supported by the camera platform. E.g. Mono / Negative / Solarize / etc
-   * Camera JPEG Quality
-     * A 1-100 sliding scale of quality. 1 is lowest. 100 is highest.
-   * Camera idle update
-     * How often selected camera lens should send a still
-   * Camera Lens
-     * Select which camera lens should be considered this devices Camera at this time
-   * LUX Sensor Report Interval
-     * How often to send an idle LUX sensor update
-   * LUX Sensor Report Threshold
-     * How large of a LUX change should be reported immediately outside of the the report interval
-   * Movement Reset Time
-     * The time it take to reset after "Device Movement" is triggered
-   * Movement Sensitivity
-     * How sensitive the "Device Movement" sensor is, lower is more sensitive. Down to 0.01
-   * Screen Touch Reset Time
-     * The time it takes to reset after "Screen Touch" is triggered
+Every feature below is a real Home Assistant entity, grouped by area. `AESPHome/docs/IMPLEMENTATION_REPORT.md`
+has the complete, exhaustive list with the exact permission each one needs and why.
 
- * Diagnostic
-   * Battery Charging
-     * Is the device charging
-   * Battery Percent
-     * The percent of battery charged
-   * Battery Temperature
-     * The temperature of the battery
-   * Identify
-     * When pressed will trigger a short audible "beep beep" from the device
-   * WiFi RSSI
-     * That thing you leave disabled
+### Media & Bluetooth
 
----
-
-New Features
----
-
-| Feature | Android requirement | Home Assistant entity |
+| Feature | Requirement | Entity |
 |---|---|---|
-| Screen brightness | "Modify system settings" permission | `number.screen_brightness` |
-| Screen orientation lock | "Modify system settings" permission | `select.screen_orientation` |
-| Wake screen | — (WakeLock) | `button.screen_wake` |
-| Sleep/lock screen | Device Admin (real lock) or none (dim-only fallback) | `button.screen_sleep` |
-| Keep screen on | — (WakeLock) | `switch.keep_screen_on` |
-| Start at boot | `RECEIVE_BOOT_COMPLETED` (already required) | `switch.start_at_boot` |
-| Android/app version, model, IP, Wi-Fi SSID/BSSID, charging source | — | `text_sensor.*` |
-| Foreground app | Usage Access permission | `text_sensor.foreground_app` |
-| Uptime, memory, storage, Wi-Fi frequency/link speed, battery voltage/current/power | — (device-dependent) | `sensor.*` |
-| Proximity, pressure, humidity, ambient temperature, accelerometer/gyroscope/magnetic field (x/y/z) | Matching hardware sensor (entity hidden if absent) | `sensor.*` |
-| App launcher | — (whitelist chosen in-app) | `select.launch_app` |
-| Bluetooth LE proxy (passive scan + active GATT connections) | `BLUETOOTH_SCAN` (12+) / location (≤11) + `BLUETOOTH_CONNECT` (already required) | `switch.bluetooth_proxy` |
-| MJPEG camera server | Camera enabled | `binary_sensor.mjpeg_server_running`, `number.mjpeg_port`, `number.mjpeg_max_fps`, `text_sensor.mjpeg_url` |
-| RTSP / H.264 server ⚠️ not verified on real hardware | Camera permission | `binary_sensor.rtsp_server_running`, `number.rtsp_port`, `number.rtsp_bitrate_kbps`, `select.rtsp_resolution`, `text_sensor.rtsp_url` |
-| Person detection (on-device TFLite) | Camera enabled | `binary_sensor.person_detected`, `sensor.person_count` |
-| Auto update check | `REQUEST_INSTALL_PACKAGES` (install step only) | `binary_sensor.update_available`, `text_sensor.latest_available_version`, `button.check_for_update`, `button.install_update` |
-
-See `AESPHome/docs/IMPLEMENTATION_REPORT.md` for the full entity list and exactly what
-permission each feature needs and why.
-
-### Screen controls
-
-`number.screen_brightness` and `select.screen_orientation` control the device system-wide
-once "Modify system settings" is granted from the in-app **Permissions** screen — without it,
-they only affect this app's own window while it's visible. `button.screen_sleep` performs a
-real screen lock once **Device Admin** is enabled (also from the Permissions screen); without
-it, the button only dims the app's own window and says so in its Home Assistant description.
-
-### Permissions
-
-The app never requests every permission on first launch. Open **Permissions** from the main
-screen to see Granted/Denied/Not-supported for each one an enabled feature needs, with an
-Enable button that opens the right Android settings screen.
-
-### Bluetooth Proxy
+| Media player (audio) | — | `media_player.*` (libVLC-backed) |
+| System volume | — | `number.system_volume` |
+| Bluetooth radio on/off | Nearby Devices permission | `switch.bluetooth_enabled` |
+| Connect/disconnect a paired speaker | Nearby Devices permission | `select` (command dropdown) |
+| Bluetooth LE proxy — passive scan **and** active GATT connections | `BLUETOOTH_SCAN`/location + `BLUETOOTH_CONNECT` | `switch.bluetooth_proxy` |
 
 Enabling `switch.bluetooth_proxy` makes the device show up to Home Assistant's own Bluetooth
 integration as a full Bluetooth Proxy: passive advertisement scanning (most sensors/trackers)
@@ -160,10 +50,19 @@ integration as a full Bluetooth Proxy: passive advertisement scanning (most sens
 a BLE peripheral's characteristics). Pairing and cache-clearing aren't implemented — see
 `AESPHome/docs/BLUETOOTH_PROXY.md` for exactly what is.
 
-### MJPEG / go2rtc / Frigate
+### Camera & streaming
+
+| Feature | Requirement | Entity |
+|---|---|---|
+| ESPHome camera (stills + stream) | Camera permission | `camera.*` |
+| Lens / rotation / resolution / effect / JPEG quality / idle update rate | — | `select`/`number` per option |
+| Illuminance from the camera or light sensor | Camera or light sensor | `sensor.lux_*` |
+| MJPEG HTTP server | Camera enabled | `binary_sensor.mjpeg_server_running`, `number.mjpeg_port`, `number.mjpeg_max_fps`, `text_sensor.mjpeg_url` |
+| RTSP / H.264 server ⚠️ | Camera permission | `binary_sensor.rtsp_server_running`, `number.rtsp_port`, `number.rtsp_bitrate_kbps`, `select.rtsp_resolution`, `text_sensor.rtsp_url` |
+| Person detection (on-device TFLite) | Camera enabled | `binary_sensor.person_detected`, `sensor.person_count` |
 
 Enabling the MJPEG server (alongside Camera) exposes the same capture feed the ESPHome camera
-entity uses over plain HTTP, for anything that wants a direct feed instead of going through
+entity uses, over plain HTTP, for anything that wants a direct feed instead of going through
 Home Assistant:
 
 ```
@@ -171,10 +70,9 @@ http://<device-ip>:8080/camera.jpg     # single JPEG
 http://<device-ip>:8080/camera.mjpeg   # multipart/x-mixed-replace stream
 ```
 
-The port and max FPS are configurable in-app (`number.mjpeg_port`, `number.mjpeg_max_fps`);
-a per-device token is required by default and shown in the app next to the URL
-(`?token=...`). Disabling the token requirement is in-app only — deliberately not an HA
-entity, so it can't be switched off remotely.
+Port and max FPS are configurable in-app. A per-device token is required by default and shown
+in the app next to the URL (`?token=...`); disabling the token requirement is in-app only —
+deliberately not a Home Assistant entity, so it can't be switched off remotely.
 
 **go2rtc:**
 
@@ -202,30 +100,76 @@ cameras:
 ```
 
 A direct `rtsp://<device-ip>:8554/aesphome` H.264 stream is also implemented (Camera2 →
-MediaCodec → RTP-over-TCP) — see `AESPHome/docs/RTSP_PLAN.md`, including an important caveat:
-it was never verified against a real player, only built and unit-tested for the pure protocol
-logic. Test it on real hardware before relying on it.
+MediaCodec → RTP-over-TCP) — see `AESPHome/docs/RTSP_PLAN.md`. It has had less real-world
+testing than everything else in this list; if a stream won't play, that doc's troubleshooting
+section is the place to start.
 
-### Person Detection
+Person detection runs a small on-device model (EfficientDet-Lite0, bundled, CPU-only,
+~4.3MB) against the camera feed — no image or video data leaves the device. It's a genuinely
+new dependency (`tensorflow-lite-task-vision`), adding roughly 18MB to the APK; it's opt-in
+and off by default.
 
-Enabling **Person Detection** (alongside Camera) runs a small on-device TFLite model
-(EfficientDet-Lite0, bundled, CPU-only, ~4.3MB) against the camera feed and reports
-`binary_sensor.person_detected` / `sensor.person_count` to Home Assistant — no image or video
-data leaves the device. This is a genuinely new dependency (`tensorflow-lite-task-vision`),
-adding roughly 18MB to the APK; it's opt-in and off by default.
+### Screen
 
-### Auto Update
+| Feature | Requirement | Entity |
+|---|---|---|
+| Brightness | "Modify system settings" permission | `number.screen_brightness` |
+| Orientation lock | "Modify system settings" permission | `select.screen_orientation` |
+| Wake screen | — (WakeLock) | `button.screen_wake` |
+| Sleep/lock screen | Device Admin (real lock) or dim-only fallback | `button.screen_sleep` |
+| Keep screen on | — (WakeLock) | `switch.keep_screen_on` |
+| Screen on/off state | — | `binary_sensor.screen_on` |
+| Screen touch (recent activity) | Accessibility Service enabled | `binary_sensor.screen_touch` |
 
-With **Auto Update Check** enabled, the app periodically compares its own version against the
-latest release on `github.com/rafal83/AESPHome` and reports `binary_sensor.update_available`
-/ `text_sensor.latest_available_version`. `button.install_update` (or the in-app equivalent)
-downloads that release's APK and opens Android's own install-confirmation screen — the last
-tap is unavoidable without root or device-owner status, so this automates checking and
-downloading, not the final install itself.
+`number.screen_brightness` and `select.screen_orientation` control the device system-wide
+once "Modify system settings" is granted from the in-app **Permissions** screen — without it,
+they only affect this app's own window while it's visible. `button.screen_sleep` performs a
+real screen lock once **Device Admin** is enabled (also from the Permissions screen); without
+it, the button only dims the app's own window and says so in its Home Assistant description.
+`button.screen_wake` only wakes the screen — it does not bring AESPHome to the foreground.
+
+### App control
+
+| Feature | Requirement | Entity |
+|---|---|---|
+| Start at boot | `RECEIVE_BOOT_COMPLETED` (already required) | `switch.start_at_boot` |
+| Launch an app | Whitelist chosen in-app (Allowed Apps screen) | `select.launch_app` |
+| Foreground app | Usage Access permission | `text_sensor.foreground_app` |
+| Check for / install app updates | `REQUEST_INSTALL_PACKAGES` (install step only) | `binary_sensor.update_available`, `text_sensor.latest_available_version`, `button.check_for_update`, `button.install_update` |
+| Identify (audible beep) | — | `button.identify` |
+
+`select.launch_app` can only launch a package you've explicitly allowed on the **Allowed
+Apps** screen — there's no way to launch an arbitrary app from the network. With **Auto
+Update Check** enabled, the app periodically compares its own version against the latest
+release on `github.com/rafal83/AESPHome`. Installing still needs one tap on Android's own
+confirmation screen — there's no way around that without root, so this automates checking and
+downloading, not the final install step.
+
+### Sensors
+
+| Feature | Requirement | Entity |
+|---|---|---|
+| Battery percent / charging / temperature / voltage / current / power / source | Device-dependent | `sensor.battery_*`, `binary_sensor.battery_charging`, `text_sensor.charging_source` |
+| Wi-Fi RSSI / frequency / link speed | — | `sensor.wifi_*` |
+| Device movement / orientation | — | `binary_sensor.device_movement`, `sensor.device_orientation` |
+| Ambient noise (dB) | Microphone permission | `sensor.ambient_noise` |
+| Proximity, pressure, humidity, ambient temperature | Matching hardware (hidden if absent) | `sensor.*` |
+| Accelerometer / gyroscope / magnetic field (x/y/z) | Matching hardware (hidden if absent) | `sensor.*` |
+
+### Diagnostics
+
+| Feature | Requirement | Entity |
+|---|---|---|
+| Android/app version, device model | — | `text_sensor.*` |
+| IP address, Wi-Fi SSID/BSSID | — | `text_sensor.*` |
+| Uptime, free/total memory, free/total storage | — | `sensor.*` |
+
+### Permissions
+
+The app never requests every permission on first launch. Open **Permissions** from the main
+screen to see Granted/Denied/Not-supported for each one an enabled feature needs, with an
+Enable button that opens the right Android settings screen.
 
 ---
 
-
 <img width="343" height="1901" alt="Controls, Sensors, Configuration" src="https://github.com/user-attachments/assets/45da6d1e-fec6-4c83-a9d9-fb3774731fc0" />
-
-
