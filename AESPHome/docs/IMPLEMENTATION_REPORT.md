@@ -65,9 +65,9 @@ proxy messages); every other feature is a new file plus one line in `Sensors`.
 - **Auto update**: `sensors/auto_update.kt` periodically checks
   `github.com/rafal83/AESPHome`'s latest release (`GET /repos/.../releases/latest`, platform
   `HttpURLConnection`/`org.json` only — no new networking/JSON dependency) and compares its tag
-  against `BuildConfig.VERSION_NAME`. `binary_sensor.update_available` and
-  `text_sensor.latest_available_version` report the result; `button.install_update` downloads
-  the release's `.apk` asset and hands it to the system package installer via a `FileProvider`
+  against `BuildConfig.VERSION_NAME`. `update.aesphome_firmware` (a real ESPHome `update`
+  entity as of v0.2.4 — see below) reports the result; its UPDATE command downloads the
+  release's `.apk` asset and hands it to the system package installer via a `FileProvider`
   URI. The final install step always needs one tap on Android's own confirmation screen —
   there is no silent-install path without root/device-owner (same constraint as everything
   else in this branch), so this automates checking and downloading, not the security-gated
@@ -170,9 +170,7 @@ proxy messages); every other feature is a new file plus one line in `Sensors`.
 | `text_sensor.rtsp_url` | text_sensor | Ready-to-use RTSP URL |
 | `binary_sensor.person_detected` | binary_sensor | On-device TFLite detection, "person" class |
 | `sensor.person_count` | sensor | Count of "person" detections in the last inference |
-| `binary_sensor.update_available` | binary_sensor | Newer GitHub release exists |
-| `text_sensor.latest_available_version` | text_sensor | That release's tag |
-| `button.check_for_update` / `button.install_update` | button | Manual check; download + open installer |
+| `update.aesphome_firmware` | update | Check/Install buttons, real progress bar during download |
 
 `binary_sensor.screen_on` and `binary_sensor.charging` (as `battery_charging`) already
 existed before this branch and are unchanged.
@@ -186,7 +184,7 @@ existed before this branch and are unchanged.
 | `BLUETOOTH_SCAN` (`neverForLocation`) / `ACCESS_FINE_LOCATION` (≤ API 30) | Passive BLE proxy scanning |
 | `PACKAGE_USAGE_STATS` | `text_sensor.foreground_app` |
 | `FOREGROUND_SERVICE_CAMERA` / `_MICROPHONE` / `_CONNECTED_DEVICE` | Required alongside the existing `FOREGROUND_SERVICE_MEDIA_PLAYBACK` now that the service's declared type set covers what it actually does |
-| `REQUEST_INSTALL_PACKAGES` | `button.install_update` launching the system package installer |
+| `REQUEST_INSTALL_PACKAGES` | `update.aesphome_firmware`'s Install command launching the system package installer |
 
 The active Bluetooth GATT proxy and the RTSP server add no *new* permissions — `BLUETOOTH_CONNECT`
 was already required unconditionally (`bluetooth_switch.kt`), and RTSP reuses the `CAMERA`
@@ -234,6 +232,34 @@ falls back to `Other` instead of failing to compile — `UiSectionTest.kt` pins 
 currently-registered id is actually mapped, so nothing silently lands in the fallback.
 `MainActivity` now renders one bold header + a heavier divider per section, sorted internally
 by label exactly as before.
+
+# Real `update` entity, RTSP fixes, matched camera resolution (v0.2.4)
+
+- **Real ESPHome `update` entity** (ids 116/117/118): `update.aesphome_firmware` replaces the
+  previous `binary_sensor.update_available` + `text_sensor.latest_available_version` +
+  two buttons — the same "Update available" card with Check/Install buttons a real ESPHome
+  device's own OTA flow shows in Home Assistant, instead of a hand-rolled approximation of
+  one. `AutoUpdateService` now implements both `Service` (background timer) and the new
+  `UpdateEntity` interface (`Sensor.kt`). Install progress is reported in real time via the
+  protocol's `progress`/`has_progress` fields while the APK downloads.
+- **RTSP: per-session writer thread**, fixing a real bug found by real-device testing — a
+  stream that played fine then went silent after a Wi-Fi hiccup. Java's `Socket` has a read
+  timeout but no write-timeout equivalent; the previous code wrote RTP packets directly from
+  the single shared encoder drain thread, so one client's TCP send buffer filling (client not
+  reading fast enough, or a brief network stall) could block that write indefinitely —
+  freezing frame delivery to every session, forever, with no recovery. Each `RtspSession` now
+  owns a small bounded queue (latest-frame-wins, matching the "keep only the newest" queue
+  pattern already used for JPEG frames elsewhere in this codebase) and its own writer thread;
+  `sendAccessUnit()` (called from the shared drain thread) only ever enqueues, never blocks.
+- **RTSP now matches Camera's own resolution** — it previously had its own independent
+  640x480/1280x720 choice; `CameraService.selectedResolution()` is now the single source of
+  truth for "what resolution is this device's camera," used by RTSP the same way MJPEG/HA's
+  own camera entity already did via the shared JPEG pipeline.
+- The initial "no data received in 10s, Switching to TCP" a real-device test showed in VLC's
+  log is understood to be VLC/live555's own client-side behavior (it attempts UDP internally
+  regardless of the SETUP response, self-correcting via an internal watchdog) rather than a
+  server-side bug — not changed, since there's nothing on this server's side to change about
+  another program's transport-negotiation default.
 
 # Post-release fixes from real-device testing (v0.2.2)
 

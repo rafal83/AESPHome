@@ -50,6 +50,13 @@ private const val MESSAGE_SUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST = 66
 private const val MESSAGE_UNSUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST = 87
 private const val MESSAGE_BLE_RAW_ADVERTISEMENTS_RESPONSE = 93
 
+// update — real HA `update.` entity (the same "update available, Install button" card a real
+// ESPHome device's own OTA flow shows), used by sensors/auto_update.kt instead of a plain
+// binary_sensor + buttons.
+private const val MESSAGE_LIST_ENTITIES_UPDATE = 116
+private const val MESSAGE_UPDATE_STATE_RESPONSE = 117
+private const val MESSAGE_UPDATE_COMMAND_REQUEST = 118
+
 // Bluetooth GATT proxy (active connections) — see sensors/bluetooth_gatt.kt
 private const val MESSAGE_BLE_DEVICE_REQUEST = 68
 private const val MESSAGE_BLE_DEVICE_CONNECTION_RESPONSE = 69
@@ -201,6 +208,26 @@ private const val F_BLE_CONNFREE_LIMIT = 2
 private const val F_BLE_PAIR_ADDRESS = 1
 private const val F_BLE_PAIR_RESULT = 2
 private const val F_BLE_PAIR_ERROR = 3
+
+// ListEntitiesUpdateResponse fields beyond the shared object_id/key/name
+private const val F_UPDATE_ICON = 5
+private const val F_UPDATE_DISABLED_BY_DEFAULT = 6
+private const val F_UPDATE_ENTITY_CATEGORY = 7
+private const val F_UPDATE_DEVICE_CLASS = 8
+
+// UpdateStateResponse
+private const val F_UPDATE_MISSING_STATE = 2
+private const val F_UPDATE_IN_PROGRESS = 3
+private const val F_UPDATE_HAS_PROGRESS = 4
+private const val F_UPDATE_PROGRESS = 5
+private const val F_UPDATE_CURRENT_VERSION = 6
+private const val F_UPDATE_LATEST_VERSION = 7
+private const val F_UPDATE_TITLE = 8
+private const val F_UPDATE_RELEASE_SUMMARY = 9
+private const val F_UPDATE_RELEASE_URL = 10
+
+// UpdateCommandRequest (client -> server) — key is the shared F_ENTITY_KEY (field 1)
+private const val F_UPDATE_COMMAND = 2
 
 // ListEntitiesCameraResponse fields beyond the shared object_id/key/name
 private const val F_CAMERA_DISABLED_BY_DEFAULT = 5
@@ -682,6 +709,60 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
 
 
   //
+  // update — see UpdateEntity's doc comment (Sensor.kt). Unlike every other entity type here,
+  // its state is never derived on demand from a live read — it only ever changes when the
+  // owning UpdateEntity calls pushUpdateState() (a check completed, an install started/
+  // progressed/finished), so the last value has to be cached here for SubscribeStatesRequest
+  // to answer correctly, the same role sensorValues/sensorTextValues play for Sensor/TextSensor.
+  //
+  private val updateStates = HashMap<String, UpdateState>() // keyed by UpdateEntity.id
+
+  private fun updateListMessage(entity: UpdateEntity): Pair<Int, ByteArray> =
+    MESSAGE_LIST_ENTITIES_UPDATE to ProtobufMessageBuilder()
+      .string(F_OBJECT_ID, entity.id)
+      .fixed32(F_KEY, entity.key)
+      .string(F_NAME, entity.label)
+      .string(F_UPDATE_ICON, entity.icon)
+      .varint(F_UPDATE_DISABLED_BY_DEFAULT, if (entity.enabledByDefaultHa) 0 else 1)
+      .varint(F_UPDATE_ENTITY_CATEGORY, entity.entityCategory.wireValue)
+      .string(F_UPDATE_DEVICE_CLASS, "firmware")
+      .build()
+
+  // state == null: never checked yet (missing_state=true) — HA shows "unknown" rather than a
+  // fabricated "up to date"/"update available" guess.
+  private fun updateStateMessage(entity: UpdateEntity, state: UpdateState?): Pair<Int, ByteArray> {
+    val builder = ProtobufMessageBuilder()
+      .fixed32(F_ENTITY_KEY, entity.key)
+      .varint(F_UPDATE_MISSING_STATE, if (state == null) 1 else 0)
+      .string(F_UPDATE_TITLE, entity.label)
+    if (state != null) {
+      builder
+        .varint(F_UPDATE_IN_PROGRESS, if (state.inProgress) 1 else 0)
+        .varint(F_UPDATE_HAS_PROGRESS, if (state.progress != null) 1 else 0)
+        .float(F_UPDATE_PROGRESS, state.progress ?: 0f)
+        .string(F_UPDATE_CURRENT_VERSION, state.currentVersion)
+        .string(F_UPDATE_LATEST_VERSION, state.latestVersion)
+        .string(F_UPDATE_RELEASE_SUMMARY, state.releaseSummary)
+        .string(F_UPDATE_RELEASE_URL, state.releaseUrl)
+    }
+    return MESSAGE_UPDATE_STATE_RESPONSE to builder.build()
+  }
+
+  // Called from whatever background thread AutoUpdateService's check/download already runs
+  // on (never the main thread) — same direct-send style as the Bluetooth GATT push functions,
+  // no extra Thread spawned per call.
+  fun pushUpdateState(entity: UpdateEntity, state: UpdateState) {
+    updateStates[entity.id] = state
+    val conn = activeConn ?: return
+    try {
+      val (type, payload) = updateStateMessage(entity, state)
+      send(conn, type, payload)
+    } catch (e: Exception) { Log.e(TAG, "Update state push failed: ${e.message}") }
+  }
+
+
+
+  //
   // text_sensor — same shape as Sensor's binary_sensor/sensor pair, minus a `kind`, plus
   // missing_state for "genuinely unavailable right now" instead of a fabricated string.
   //
@@ -865,6 +946,10 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
               val (type, bytes) = switchListMessage(switch)
               send(conn, type, bytes)
             }
+            for (update in Sensors.updates.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
+              val (type, bytes) = updateListMessage(update)
+              send(conn, type, bytes)
+            }
             send(conn, MESSAGE_LIST_ENTITIES_DONE, ByteArray(0))
           }
 
@@ -895,6 +980,10 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
             }
             for (switch in Sensors.switches.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
               val (type, bytes) = switchStateMessage(switch, switch.isOn(appContext))
+              send(conn, type, bytes)
+            }
+            for (update in Sensors.updates.filter { isEnabled(appContext, it) && it.isAvailable(appContext) }) {
+              val (type, bytes) = updateStateMessage(update, updateStates[update.id])
               send(conn, type, bytes)
             }
             // HA has now finished its handshake and is listening — wake CameraService's
@@ -1039,6 +1128,25 @@ class AESPHome(context: Context, name: String? = null, friendlyName: String? = n
             switch.setOn(appContext, on)
             val (type, bytes) = switchStateMessage(switch, switch.isOn(appContext))
             send(conn, type, bytes)
+          }
+
+
+          //
+          // UpdateCommandRequest: HA's "Check"/"Install" buttons on the update card. No state
+          // is sent back directly here — the entity's onCheckCommand/onUpdateCommand run
+          // asynchronously (a network call, a download) and report their own result through
+          // pushUpdateState() once they actually have one, same as every other async command
+          // in this codebase (e.g. Bluetooth enable/disable via SwitchEntity).
+          //
+          MESSAGE_UPDATE_COMMAND_REQUEST -> run {
+            val fields = decodeFields(payload)
+            val key = fields.fieldOrNull<ByteArray>(F_ENTITY_KEY)?.let(::bytesToInt) ?: return@run
+            val command = fields.fieldOrNull<Int>(F_UPDATE_COMMAND) ?: 0
+            val entity = Sensors.updates.find { it.key == key } ?: return@run
+            when (command) {
+              1 -> entity.onUpdateCommand(appContext) // UPDATE_COMMAND_UPDATE
+              2 -> entity.onCheckCommand(appContext)  // UPDATE_COMMAND_CHECK
+            }
           }
 
 

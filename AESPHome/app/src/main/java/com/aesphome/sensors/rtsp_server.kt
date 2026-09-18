@@ -23,7 +23,9 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.nio.charset.Charset
 import java.util.UUID
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
 
@@ -83,14 +85,11 @@ object RtspServerService : Service {
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
       enabledByDefaultHa = false, icon = "mdi:speedometer")
 
-  val resolutionSetting = SelectSetting(
-      id = "rtsp_resolution", label = "RTSP Resolution",
-      options = listOf("640x480", "1280x720"), default = "640x480",
-      deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
-      icon = "mdi:image-size-select-large")
-
+  // No resolution setting of its own — streams whatever CameraService's currently-selected
+  // lens/resolution already is (CameraService.selectedResolution()), same "one camera, one
+  // resolution" answer the JPEG/MJPEG path gives, rather than offering an independent choice
+  // for what's conceptually the same camera.
   override val settings: List<Setting> = listOf(portSetting, bitrateSetting)
-  override val selectSettings: List<SelectSetting> = listOf(resolutionSetting)
 
   @Volatile private var running = false
   private var serverSocket: ServerSocket? = null
@@ -199,7 +198,12 @@ object RtspServerService : Service {
     if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
       Log.e(TAG, "RTSP: CAMERA permission not granted"); return
     }
-    val (width, height) = parseResolution(getSelectSetting(context, resolutionSetting))
+    val nativeSize = CameraService.selectedResolution(context)
+    if (nativeSize == null) {
+      Log.e(TAG, "RTSP: could not determine the camera's native resolution — is Camera enabled and its lens list refreshed?")
+      return
+    }
+    val (width, height) = nativeSize.width to nativeSize.height
     val bitrate = (getSetting(context, bitrateSetting) * 1000).toInt()
 
     val format = MediaFormat.createVideoFormat("video/avc", width, height).apply {
@@ -326,11 +330,6 @@ internal fun fuAHeaderBytes(nalHeader: Byte, isFirst: Boolean, isLast: Boolean):
   return indicator to fuHeader
 }
 
-private fun parseResolution(value: String): Pair<Int, Int> {
-  val (w, h) = value.split("x").takeIf { it.size == 2 } ?: return 640 to 480
-  return (w.toIntOrNull() ?: 640) to (h.toIntOrNull() ?: 480)
-}
-
 // Splits an Annex-B buffer (each NAL prefixed by a 3- or 4-byte 00 00 [00] 01 start code —
 // exactly what MediaCodec's AVC encoder output already is) into individual NAL units
 // (start-code stripped). Each NAL's end is wherever the next start code begins (its leading
@@ -354,21 +353,64 @@ internal fun splitAnnexB(data: ByteArray): List<ByteArray> {
   return nals
 }
 
+// One access unit (every NAL belonging to one encoded frame) queued for a session's writer
+// thread — see the class doc comment below for why this exists instead of writing directly
+// from the shared encoder drain thread.
+private data class AccessUnit(val nals: List<ByteArray>, val presentationTimeUs: Long)
+
 // ==================== One RTSP client connection ====================
 
+// IMPORTANT: sendAccessUnit() below is called from RtspServerService's single shared encoder
+// drain thread — the same thread for every connected session. Java's Socket has a read
+// timeout (setSoTimeout) but no write-timeout equivalent; if a client stops reading (a Wi-Fi
+// hiccup, a slow/stuck player) the TCP send buffer fills and a plain blocking
+// socket.getOutputStream().write() call can hang indefinitely. If that write happened
+// directly on the shared drain thread, one stuck client would silently freeze frame delivery
+// to the camera pipeline and every other session forever — exactly the kind of
+// stops-after-a-network-hiccup symptom this was written to rule out. So each session owns a
+// small bounded queue (latest-frame-wins, like the JPEG queues elsewhere in this codebase)
+// and its own dedicated writer thread; sendAccessUnit() only ever enqueues (non-blocking) and
+// returns immediately — only that session's own writer thread can ever be the one stuck in a
+// blocking write, never the encoder or another client.
 internal class RtspSession(private val server: RtspServerService, private val context: Context, private val socket: Socket) {
   @Volatile var playing = false
   private val sessionId = UUID.randomUUID().toString().replace("-", "").take(16)
   private var seq = Random.nextInt(0, 0xFFFF)
   private val ssrc = Random.nextInt()
-  private val writeLock = Any()
+
+  private val outgoing = ArrayBlockingQueue<AccessUnit>(2)
+  @Volatile private var writerRunning = false
+  private var writerThread: Thread? = null
 
   fun start() {
+    writerRunning = true
+    writerThread = Thread({ writerLoop() }, "AESPHomeRtspWriter").apply { start() }
     Thread({ handle() }, "AESPHomeRtspClient").start()
   }
 
   fun close() {
+    writerRunning = false
+    writerThread?.interrupt()
     try { socket.close() } catch (e: IOException) {}
+  }
+
+  // The only thread that ever calls writeRawRtp() (and therefore the only one that can ever
+  // block in a socket write) — sits idle on the queue until PLAY starts producing frames.
+  // Closing the socket (close(), above) is what unblocks a write that's genuinely stuck: it
+  // makes the in-flight write throw, caught below same as any other IOException.
+  private fun writerLoop() {
+    while (writerRunning) {
+      val unit = try { outgoing.poll(1, TimeUnit.SECONDS) } catch (e: InterruptedException) { break } ?: continue
+      val rtpTimestamp = ((unit.presentationTimeUs * RTP_CLOCK_HZ) / 1_000_000L).toInt()
+      try {
+        for ((i, nal) in unit.nals.withIndex()) {
+          sendNal(nal, rtpTimestamp, markLast = i == unit.nals.lastIndex)
+        }
+      } catch (e: IOException) {
+        playing = false // the read side (or the next enqueue) will notice and clean up
+        break
+      }
+    }
   }
 
   private fun handle() {
@@ -441,16 +483,15 @@ internal class RtspSession(private val server: RtspServerService, private val co
     socket.getOutputStream().write(text.toByteArray())
   }
 
+  // Called from RtspServerService's shared encoder drain thread — must never block (see the
+  // class doc comment above). "Latest access unit wins" if the writer thread is falling
+  // behind: drop the queued-but-not-yet-sent one rather than let the queue (and therefore
+  // latency) grow unbounded.
   fun sendAccessUnit(nals: List<ByteArray>, presentationTimeUs: Long) {
-    val rtpTimestamp = ((presentationTimeUs * RTP_CLOCK_HZ) / 1_000_000L).toInt()
-    synchronized(writeLock) {
-      try {
-        for ((i, nal) in nals.withIndex()) {
-          sendNal(nal, rtpTimestamp, markLast = i == nals.lastIndex)
-        }
-      } catch (e: IOException) {
-        playing = false // next write attempt (or the read side) will notice and clean up
-      }
+    val unit = AccessUnit(nals, presentationTimeUs)
+    if (!outgoing.offer(unit)) {
+      outgoing.poll()
+      outgoing.offer(unit)
     }
   }
 

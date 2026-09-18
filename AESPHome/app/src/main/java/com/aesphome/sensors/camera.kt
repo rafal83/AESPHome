@@ -243,6 +243,21 @@ object CameraService : Service {
     return Size(w.toIntOrNull() ?: return null, h.toIntOrNull() ?: return null)
   }
 
+  // Same lens-index -> resolution lookup openCamera() uses, exposed so other consumers of
+  // "this device's camera" (the RTSP server) use the exact same resolution as the JPEG/MJPEG
+  // path instead of maintaining a second, independent resolution choice for what's
+  // conceptually the same camera. Falls back to this lens's smallest supported size if
+  // nothing's been persisted yet (mirrors openCamera()'s own fallback), or null if this lens
+  // has no known sizes at all (e.g. refreshLensOptions() hasn't run).
+  fun selectedResolution(context: Context): Size? {
+    val selectedIndex = lensSetting.options.indexOf(getSelectSetting(context, lensSetting)).coerceAtLeast(0)
+    resolutionSettings[selectedIndex]?.let { setting ->
+      parseSize(getSelectSetting(context, setting))?.let { return it }
+      parseSize(setting.options.firstOrNull() ?: return null)?.let { return it }
+    }
+    return null
+  }
+
 
 
 

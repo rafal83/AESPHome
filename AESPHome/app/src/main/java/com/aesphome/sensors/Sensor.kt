@@ -126,6 +126,30 @@ interface SwitchEntity : Toggleable, Startable {
   fun setOn(context: Context, on: Boolean)
 }
 
+// An ESPHome `update` entity — the same "update available" card with an Install button real
+// ESPHome firmware's own OTA flow shows in Home Assistant. Two-way like SwitchEntity: HA sends
+// an UpdateCommandRequest (CHECK or UPDATE) via onCommand(), and the implementation reports its
+// own state back through AESPHome.pushUpdateState() whenever it changes (a check completes, an
+// install starts/progresses/finishes) — there's no polling from esphome.kt's side.
+interface UpdateEntity : Toggleable {
+  val key: Int // ESPHome wire-protocol entity key — must be unique per device
+  fun onCheckCommand(context: Context)
+  fun onUpdateCommand(context: Context)
+}
+
+// The state an UpdateEntity reports through AESPHome.pushUpdateState() (esphome.kt). Home
+// Assistant shows "up to date" when latestVersion == currentVersion, and an "Update available"
+// card with an Install button otherwise — progress == null renders as an indeterminate
+// spinner while inProgress is true; a 0..100 value renders a determinate progress bar.
+data class UpdateState(
+    val currentVersion: String,
+    val latestVersion: String,
+    val inProgress: Boolean = false,
+    val progress: Float? = null,
+    val releaseSummary: String = "",
+    val releaseUrl: String = "",
+)
+
 // A component with a start()/stop() lifecycle, independent of what it toggles (an
 // ESPHome entity, for EventSensor; nothing, for Service). Lets callers like MainActivity
 // treat both the same way instead of branching on each type separately.
@@ -183,8 +207,7 @@ object Sensors {
     MagneticFieldXSensor, MagneticFieldYSensor, MagneticFieldZSensor,
     MjpegServerRunningSensor,
     PersonDetectedSensor, PersonCountSensor,
-    RtspServerRunningSensor,
-    UpdateAvailableSensor
+    RtspServerRunningSensor
   )
 
   val readSensors: List<ReadSensor> = listOf(
@@ -214,10 +237,12 @@ object Sensors {
     MjpegUrlSensor,
     RtspUrlSensor
   )
-  // LatestVersionSensor is a plain TextSensor (not ReadTextSensor) — its value is pushed by
-  // AutoUpdateService's own check timer, not polled by diagnosticsLoop, so it's listed here
-  // but deliberately left out of readTextSensors above.
-  val textSensors: List<TextSensor> = readTextSensors + listOf(LatestVersionSensor)
+  val textSensors: List<TextSensor> = readTextSensors
+
+  // update.* — see UpdateEntity's doc comment. Just AutoUpdateService itself: it's both the
+  // Service driving the periodic check (settings, start/stop) and the one Update entity HA
+  // sees, rather than a separate object for each.
+  val updates: List<UpdateEntity> = listOf(AutoUpdateService)
 
   val services: List<Service> = listOf(
     MdnsService,
@@ -236,8 +261,7 @@ object Sensors {
 
 
   val buttons: List<Button> = listOf(
-    IdentifyButton, ScreenWakeButton, ScreenSleepButton,
-    CheckForUpdateButton, InstallUpdateButton
+    IdentifyButton, ScreenWakeButton, ScreenSleepButton
   )
   val switches: List<SwitchEntity> = listOf(
     BluetoothSwitch,
@@ -246,7 +270,7 @@ object Sensors {
     BluetoothProxySwitch
   )
   val all: List<Sensor> = eventSensors + readSensors
-  val toggleables: List<Toggleable> = all + textSensors + services + buttons + switches
+  val toggleables: List<Toggleable> = all + textSensors + services + buttons + switches + updates
 }
 
 // Which group of the settings screen a Toggleable's row belongs to (MainActivity.kt) — purely
@@ -295,9 +319,7 @@ internal val UI_SECTION_BY_ID: Map<String, UiSection> = buildMap {
       "wifi_frequency", "wifi_link_speed",
       "battery_voltage", "battery_current", "battery_power")) put(id, UiSection.DIAGNOSTICS)
 
-  for (id in listOf("mdns", "identify", "start_at_boot", "app_launcher", "auto_update",
-      "update_available", "latest_available_version",
-      "check_for_update", "install_update")) put(id, UiSection.APP_CONTROL)
+  for (id in listOf("mdns", "identify", "start_at_boot", "app_launcher", "auto_update")) put(id, UiSection.APP_CONTROL)
 }
 
 val Toggleable.uiSection: UiSection get() = UI_SECTION_BY_ID[id] ?: UiSection.OTHER

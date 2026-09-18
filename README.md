@@ -135,7 +135,7 @@ it, the button only dims the app's own window and says so in its Home Assistant 
 | Start at boot | `RECEIVE_BOOT_COMPLETED` (already required) | `switch.start_at_boot` |
 | Launch an app | Whitelist chosen in-app (Allowed Apps screen) | `select.launch_app` |
 | Foreground app | Usage Access permission | `text_sensor.foreground_app` |
-| Check for / install app updates | `REQUEST_INSTALL_PACKAGES` (install step only) | `binary_sensor.update_available`, `text_sensor.latest_available_version`, `button.check_for_update`, `button.install_update` |
+| Check for / install app updates | `REQUEST_INSTALL_PACKAGES` (install step only) | `update.aesphome_firmware` — same Check/Install card real ESPHome devices show |
 | Identify (audible beep) | — | `button.identify` |
 
 `select.launch_app` can only launch a package you've explicitly allowed on the **Allowed
