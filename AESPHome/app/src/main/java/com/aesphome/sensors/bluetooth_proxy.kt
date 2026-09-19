@@ -49,6 +49,14 @@ object BluetoothProxySwitch : SwitchEntity {
   private var handler: Handler? = null
   private var scanner: BluetoothLeScanner? = null
 
+  // Diagnostic-only counters — logged on a throttle (not per-advertisement, which would
+  // flood logcat) so "is the scan actually seeing anything at all" is answerable from
+  // logcat alone instead of needing a live packet capture or a second API client (which
+  // would fight the real one over this server's single active connection).
+  private var advertisementCount = 0
+  private val seenAddresses = HashSet<Long>()
+  private var lastDiagnosticLogMs = 0L
+
   // BluetoothLeScanner's public startScan() overload has no Handler parameter, and
   // ScanCallback isn't documented to always land off the main thread — so the actual push
   // (a blocking socket write under send()'s lock) is bounced onto our own HandlerThread
@@ -57,6 +65,17 @@ object BluetoothProxySwitch : SwitchEntity {
     override fun onScanResult(callbackType: Int, result: ScanResult) {
       val address = macStringToLong(result.device.address) ?: return
       val data = result.scanRecord?.bytes ?: return
+
+      advertisementCount++
+      seenAddresses.add(address)
+      val now = System.currentTimeMillis()
+      if (now - lastDiagnosticLogMs > 30_000) {
+        Log.i("$TAG/BLE", "passive scan: $advertisementCount advertisements from ${seenAddresses.size} distinct devices in the last ~30s")
+        advertisementCount = 0
+        seenAddresses.clear()
+        lastDiagnosticLogMs = now
+      }
+
       handler?.post { AESPHomeService.instance?.pushBleAdvertisement(address, result.rssi, 0, data) }
     }
     override fun onScanFailed(errorCode: Int) {
@@ -106,8 +125,16 @@ object BluetoothProxySwitch : SwitchEntity {
     val thread = HandlerThread("AESPHomeBleScan").apply { start() }
     handlerThread = thread
     handler = Handler(thread.looper)
+    // LOW_LATENCY (near-continuous scanning), not the default LOW_POWER (~10% duty cycle,
+    // one ~0.5s scan window roughly every 5s) — this app is a *proxy* whose entire purpose
+    // is catching advertisements reliably (for Bermuda-style RSSI triangulation, which needs
+    // frequent, consistent readings), not a background feature on a battery-constrained
+    // phone. LOW_POWER's short, infrequent windows can miss a device whose own advertising
+    // interval doesn't happen to land inside them — this device is assumed to typically be a
+    // dedicated, mains-powered "kiosk" tablet where scan-radio battery cost isn't the
+    // relevant trade-off.
     val settings = ScanSettings.Builder()
-        .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+        .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
         .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
         .build()
     try {
