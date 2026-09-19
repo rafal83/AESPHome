@@ -271,7 +271,7 @@ object Sensors {
 
 
   val buttons: List<Button> = listOf(
-    IdentifyButton, ScreenWakeButton, ScreenSleepButton
+    IdentifyButton, ScreenWakeButton, ScreenSleepButton, CheckForUpdateButton
   )
   val switches: List<SwitchEntity> = listOf(
     BluetoothSwitch,
@@ -329,7 +329,7 @@ internal val UI_SECTION_BY_ID: Map<String, UiSection> = buildMap {
       "wifi_frequency", "wifi_link_speed",
       "battery_voltage", "battery_current", "battery_power")) put(id, UiSection.DIAGNOSTICS)
 
-  for (id in listOf("mdns", "identify", "start_at_boot", "app_launcher", "auto_update")) put(id, UiSection.APP_CONTROL)
+  for (id in listOf("mdns", "identify", "start_at_boot", "app_launcher", "auto_update", "check_for_update")) put(id, UiSection.APP_CONTROL)
 }
 
 val Toggleable.uiSection: UiSection get() = UI_SECTION_BY_ID[id] ?: UiSection.OTHER

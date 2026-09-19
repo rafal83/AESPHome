@@ -31,7 +31,7 @@ private val KNOWN_IDS = listOf(
   "free_memory", "total_memory", "free_storage", "total_storage",
   "wifi_frequency", "wifi_link_speed",
   "battery_voltage", "battery_current", "battery_power",
-  "mdns", "identify", "start_at_boot", "app_launcher", "auto_update",
+  "mdns", "identify", "start_at_boot", "app_launcher", "auto_update", "check_for_update",
 )
 
 class UiSectionTest {

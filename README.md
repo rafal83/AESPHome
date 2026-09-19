@@ -146,6 +146,7 @@ it, the button only dims the app's own window and says so in its Home Assistant 
 | Launch an app | Whitelist chosen in-app (Allowed Apps screen) | `select.launch_app` |
 | Foreground app | Usage Access permission | `text_sensor.foreground_app` |
 | Check for / install app updates | `REQUEST_INSTALL_PACKAGES` (install step only) | `update.aesphome_firmware` — same Check/Install card real ESPHome devices show |
+| Force an update check from HA | — | `button.check_for_update` |
 | Identify (audible beep) | — | `button.identify` |
 
 `select.launch_app` can only launch a package you've explicitly allowed on the **Allowed
@@ -154,9 +155,14 @@ periodically compares its own version against the latest release on
 `github.com/rafal83/AESPHome` (interval configurable in-app); a **Check for Updates Now**
 button next to that setting forces an immediate check without waiting for the interval, with
 a toast reporting the result. Home Assistant offers a real Install action on
-`update.aesphome_firmware`, same as any other ESPHome device. Installing still needs one tap
-on Android's own confirmation screen — unless the app has also been made **Device Owner**
-(see the [FAQ](FAQ.md)), in which case the update installs with zero taps.
+`update.aesphome_firmware`, same as any other ESPHome device — but, same as any other ESPHome
+device, HA's own `update` entity card has no visible "check now" button of its own (only
+`homeassistant.update_entity`, a service call with no default UI). `button.check_for_update`
+is a normal, clickable ESPHome button entity that exists specifically to give HA a one-click
+way to force a check, the same workaround real ESPHome device configs use for the same
+missing HA feature. Installing still needs one tap on Android's own confirmation screen —
+unless the app has also been made **Device Owner** (see the [FAQ](FAQ.md)), in which case the
+update installs with zero taps.
 
 ### Sensors
 

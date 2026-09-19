@@ -420,3 +420,35 @@ class AESPHomeUpdateInstallReceiver : BroadcastReceiver() {
     }
   }
 }
+
+// A real ESPHome `update` entity has no "check now" action visible anywhere in Home
+// Assistant's own UI — confirmed against HA core's esphome/update.py: checking is only ever
+// reachable through the generic `homeassistant.update_entity` service (Developer Tools, or a
+// hand-built Lovelace button), never a button on the entity's own card. A separate `button`
+// entity is the standard ESPHome-side workaround real device configs use for exactly this —
+// gives Home Assistant users a normal, clickable dashboard button with no YAML/service call
+// required, alongside (not instead of) `update.aesphome_firmware` itself.
+object CheckForUpdateButton : Button {
+  override val id                  = "check_for_update"
+  override val label               = "Check for Update"
+  override val description         = ""
+  override val key: Int            = id.hashCode()
+  // Not independently toggleable in the app UI — it's only ever meaningful (and only ever
+  // sent to HA at all, via isAvailable() below) once AutoUpdateService itself is on, so it
+  // just always tracks "on" rather than needing a second switch the operator has to remember
+  // to also flip.
+  override val enabledByDefaultApp = true
+  override val enabledByDefaultHa  = true
+  override val entityCategory      = EntityCategory.DIAGNOSTIC
+  override val icon                = "mdi:update"
+
+  override fun isAvailable(context: Context): Boolean = isEnabled(context, AutoUpdateService)
+
+  // checkNow() makes a blocking network call — press() runs on esphome.kt's own client
+  // dispatch thread (the same one reading every other incoming HA message), so this must
+  // never call it directly or a slow/hung connection attempt would stall the whole API
+  // connection until it times out.
+  override fun press(context: Context) {
+    Thread({ AutoUpdateService.checkNow(context) }, "AESPHomeManualUpdateCheckButton").start()
+  }
+}
