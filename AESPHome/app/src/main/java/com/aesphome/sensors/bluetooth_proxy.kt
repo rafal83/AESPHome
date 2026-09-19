@@ -76,7 +76,8 @@ object BluetoothProxySwitch : SwitchEntity {
         lastDiagnosticLogMs = now
       }
 
-      handler?.post { AESPHomeService.instance?.pushBleAdvertisement(address, result.rssi, 0, data) }
+      val addressType = bleAddressType(address)
+      handler?.post { AESPHomeService.instance?.pushBleAdvertisement(address, result.rssi, addressType, data) }
     }
     override fun onScanFailed(errorCode: Int) {
       Log.e(TAG, "Bluetooth LE scan failed to start: error $errorCode")
@@ -157,4 +158,28 @@ object BluetoothProxySwitch : SwitchEntity {
     handler = null
     Log.i(TAG, "Bluetooth proxy: scan stopped")
   }
+}
+
+// ESPHome's wire protocol (BluetoothLERawAdvertisement.address_type) expects 0=public,
+// 1=random — matching the real ESP32 firmware, which transmits whatever type its own
+// Bluetooth radio actually reported (esphome/components/bluetooth_proxy/bluetooth_proxy.cpp:
+// `adv.address_type = raw.addr_type`). Home Assistant/Bermuda's IRK-based resolution of a
+// phone's rotating private address (Settings > a device's Bluetooth config in HA) only ever
+// runs on addresses reported as random — silently hardcoding this to 0/public, as this file
+// used to, means IRK resolution can never trigger for exactly the device type (a phone) that
+// matters most for it, with no error anywhere to explain why.
+//
+// Android's BluetoothDevice.getAddressType() only exists from API 35 (Android 15) onward —
+// not useful for the vast majority of devices this app targets (this project's own stated
+// floor is Android 9, see FAQ.md), so this instead inspects the address itself: the
+// Bluetooth Core Spec requires every RANDOM address's top two bits to be 00 (non-resolvable
+// private), 01 (resolvable private — the kind IRK resolution applies to), or 11 (static) —
+// only 10 is reserved/invalid for a random address. A real IEEE-assigned PUBLIC address has
+// no such constraint and could in principle collide with one of those three patterns, but
+// virtually every consumer BLE device advertises with a random address in practice anyway —
+// so this errs toward "random," the case IRK resolution actually needs to work, rather than
+// toward the "public" default this file used to always report unconditionally.
+internal fun bleAddressType(address: Long): Int {
+  val topBits = ((address ushr 46) and 0x3L).toInt() // top 2 bits of the MAC's most-significant byte
+  return if (topBits == 0x2) 0 else 1 // 0b10 is the one pattern reserved/invalid for random
 }
