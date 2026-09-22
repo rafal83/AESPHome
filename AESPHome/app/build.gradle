@@ -9,13 +9,10 @@ android {
 
   defaultConfig {
     applicationId "com.aesphome"
-    // 23, not 22: tensorflow-lite-task-audio (sound_classifier.kt) declares a minSdk of 23
-    // itself. The project's actual stated target is Android 9 (FAQ.md) — 22 was just a
-    // permissive floor, not a real requirement, so this costs nothing in practice.
-    minSdk 23
+    minSdk 22
     targetSdk 34
-    versionCode 23
-    versionName "2026.9.10"
+    versionCode 24
+    versionName "2026.9.11"
   }
 
   // Only configured when a keystore is actually present (release.yml decodes
@@ -85,10 +82,25 @@ dependencies {
   // (no tensorflow-lite-gpu) since the GPU delegate's device/driver compatibility is far less
   // predictable than CPU across the old/low-end Android hardware this project targets.
   implementation 'org.tensorflow:tensorflow-lite-task-vision:0.4.4'
-  // Sound event classification (sensors/sound_classifier.kt) — same Task Library family/
-  // version as the vision one above, just its audio counterpart (AudioClassifier); also
-  // CPU-only for the same reason.
-  implementation 'org.tensorflow:tensorflow-lite-task-audio:0.4.4'
+  // Sound event classification (sensors/sound_classifier.kt) — NOT tensorflow-lite-task-audio
+  // (the Task Library's high-level AudioClassifier): its native init
+  // (initJniWithModelFdAndOptions, libtask_audio_jni.so) segfaults loading this exact,
+  // officially-published model on this device — confirmed live (SIGABRT, "invalid address
+  // passed to free"), a real, known-flaky native library (see
+  // github.com/tensorflow/tensorflow/issues/96401 for a related libtask_audio_jni.so
+  // instability report). Using the core Interpreter runtime directly instead sidesteps that
+  // specific native code path entirely — YAMNet's input/output are both plain flat
+  // float32 tensors (see the model's own metadata), simple enough to drive by hand.
+  // tensorflow-lite-support (not just the -api stub task-vision/task-audio pull in
+  // transitively) for MetadataExtractor, to read the bundled label list — the one part of
+  // the old approach worth keeping, since it's a pure-Java reader, not native code.
+  // Interpreter itself; FileUtil (org.tensorflow.lite.support.common) comes transitively via
+  // tensorflow-lite-task-vision's own tensorflow-lite-support-api dependency above, already
+  // present — no separate tensorflow-lite-support needed for that.
+  implementation 'org.tensorflow:tensorflow-lite:2.13.0'
+  // MetadataExtractor (org.tensorflow.lite.support.metadata) — reads yamnet.tflite's bundled
+  // label list; lives in this artifact specifically, not tensorflow-lite-support-api.
+  implementation 'org.tensorflow:tensorflow-lite-metadata:0.4.4'
   // Noise Protocol Framework (ESPHome's encrypted API transport, noise.kt) — a small,
   // purpose-built pure-Java implementation of the actual protocol state machine (handshake
   // patterns, symmetric/cipher state, split()), not just raw crypto primitives, so this

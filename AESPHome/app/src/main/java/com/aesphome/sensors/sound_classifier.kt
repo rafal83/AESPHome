@@ -3,10 +3,16 @@ package com.aesphome
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.util.Log
-import org.tensorflow.lite.support.audio.TensorAudio
-import org.tensorflow.lite.task.audio.classifier.AudioClassifier
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import org.tensorflow.lite.DataType
+import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.support.common.FileUtil
+import org.tensorflow.lite.support.metadata.MetadataExtractor
 
 
 /*
@@ -14,17 +20,33 @@ import org.tensorflow.lite.task.audio.classifier.AudioClassifier
   Sound Classification
     binary_sensor.* (dog_barking, baby_crying, screaming, glass_breaking, smoke_alarm, siren,
     doorbell, knocking, gunshot) / text_sensor.detected_sound — a small on-device audio event
-    classifier (TFLite Task Library + a bundled YAMNet model, assets/yamnet.tflite, ~4.1MB,
-    CPU-only, 521 AudioSet classes) run continuously against the microphone.
+    classifier (bundled YAMNet model, assets/yamnet.tflite, ~4.1MB, CPU-only, 521 AudioSet
+    classes) run continuously against the microphone.
+
+    Deliberately NOT tensorflow-lite-task-audio (the Task Library's high-level AudioClassifier
+    convenience API, the same family person_detector.kt's ObjectDetector belongs to) — its
+    native init (initJniWithModelFdAndOptions, libtask_audio_jni.so) segfaulted loading this
+    exact, officially-published model on real hardware (confirmed live: SIGABRT, "invalid
+    address passed to free" — a real, known-flaky native library; see
+    github.com/tensorflow/tensorflow/issues/96401 for a related libtask_audio_jni.so
+    instability report). This drives the plain org.tensorflow.lite.Interpreter runtime
+    directly instead — the same native core the Task Library wraps, but without going through
+    its buggy audio-specific JNI layer — plus MetadataExtractor (a pure-Java flatbuffer
+    reader, unrelated native surface) just to read the label list the model already bundles.
+    YAMNet's input/output are both plain flat float32 tensors (see the model's own metadata
+    description), simple enough to drive by hand once the Task Library's convenience wrapper
+    is off the table.
 
     Unlike decibel_meter.kt's periodic burst-then-close sampling (fine for a slow-changing
     ambient noise LEVEL), a transient event like a scream or a knock can easily fall entirely
     inside decibel_meter's "off" window between bursts — catching it reliably needs the mic
-    genuinely listening the whole time. So this opens exactly one AudioRecord (via the Task
-    Library's own createAudioRecord(), sized to what the model needs) when the service starts
-    and keeps it open for as long as the service runs — the same "pay the hardware-open cost
-    once, not per detection" lesson person_detector.kt's camera stream applies; see its file
-    header comment for the fuller story of why that mattered on this project's hardware.
+    genuinely listening the whole time. So this opens exactly one AudioRecord when the service
+    starts and keeps it open for as long as the service runs, reading contiguous, back-to-back
+    windows of live audio (each classify() call blocks until a full window has arrived, so
+    there's no gap between one window ending and the next starting) — the same "pay the
+    hardware-open cost once, not per detection" lesson person_detector.kt's camera stream
+    applies; see its file header comment for the fuller story of why that mattered on this
+    project's hardware.
 
     Only a curated subset of YAMNet's 521 labels gets a dedicated binary sensor (the ones a
     home-monitoring setup is plausibly built around); text_sensor.detected_sound separately
@@ -37,8 +59,7 @@ import org.tensorflow.lite.task.audio.classifier.AudioClassifier
 
 
 private const val MODEL_ASSET = "yamnet.tflite"
-private const val POLL_MS = 500L
-private const val MAX_RESULTS = 10 // headroom above the curated label count, so more than one can score above threshold at once
+private const val SAMPLE_RATE_HZ = 16000
 
 private const val LABEL_BARK          = "Bark"
 private const val LABEL_BABY_CRY      = "Baby cry, infant cry"
@@ -78,36 +99,78 @@ object SoundClassifierService : Service {
       LABEL_GUNSHOT to GunshotSensor,
   )
 
-  private var classifier: AudioClassifier? = null
+  private var interpreter: Interpreter? = null
   private var audioRecord: AudioRecord? = null
-  private var tensorAudio: TensorAudio? = null
+  private var labels: List<String> = emptyList()
+  // Resolved once at load time (label string -> output tensor index), not looked up by name
+  // on every single inference — curatedLabelSensors' keys are checked against this model's
+  // own bundled label list rather than assumed to exist at some fixed index.
+  private var curatedIndexSensors: List<Pair<Int, EventSensor>> = emptyList()
+  private var inputBuffer: ByteBuffer? = null
+  private var outputBuffer: ByteBuffer? = null
+  private var inputSampleCount = 0
+  private var numClasses = 0
   @Volatile private var running = false
   private var thread: Thread? = null
+  private var appContext: Context? = null
 
   override fun start(context: Context) {
+    appContext = context
     if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
       Log.e(TAG, "Sound classifier: microphone permission not granted")
       return
     }
 
     val loaded = try {
-      val options = AudioClassifier.AudioClassifierOptions.builder()
-        .setScoreThreshold(getSetting(context, confidenceSetting) / 100f)
-        .setMaxResults(MAX_RESULTS)
-        .build()
-      val c = AudioClassifier.createFromFileAndOptions(context, MODEL_ASSET, options)
-      classifier = c
-      tensorAudio = c.createInputTensorAudio()
-      audioRecord = c.createAudioRecord()
-      true
+      val modelBuffer = FileUtil.loadMappedFile(context, MODEL_ASSET)
+      val interp = Interpreter(modelBuffer)
+      interpreter = interp
+
+      val inputTensor = interp.getInputTensor(0)
+      val outputTensor = interp.getOutputTensor(0)
+      if (inputTensor.dataType() != DataType.FLOAT32 || outputTensor.dataType() != DataType.FLOAT32) {
+        Log.e(TAG, "Sound classifier: expected float32 input/output, got ${inputTensor.dataType()}/${outputTensor.dataType()}")
+        false
+      } else {
+        inputSampleCount = inputTensor.numElements()
+        numClasses = outputTensor.numElements()
+        inputBuffer = ByteBuffer.allocateDirect(inputTensor.numBytes()).order(ByteOrder.nativeOrder())
+        outputBuffer = ByteBuffer.allocateDirect(outputTensor.numBytes()).order(ByteOrder.nativeOrder())
+
+        val extractedLabels = MetadataExtractor(modelBuffer).getAssociatedFile("yamnet_label_list.txt")
+            ?.bufferedReader()?.readLines() ?: emptyList()
+        labels = extractedLabels
+        val labelIndex = extractedLabels.withIndex().associate { (i, l) -> l to i }
+        curatedIndexSensors = curatedLabelSensors.mapNotNull { (label, sensor) -> labelIndex[label]?.let { it to sensor } }
+        if (curatedIndexSensors.size != curatedLabelSensors.size) {
+          Log.e(TAG, "Sound classifier: ${curatedLabelSensors.size - curatedIndexSensors.size} curated label(s) not found in the model's own label list")
+        }
+        true
+      }
     } catch (e: Exception) {
       Log.e(TAG, "Sound classifier: failed to load $MODEL_ASSET", e)
       false
     }
     if (!loaded) { stop(context); return }
 
+    val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE_HZ, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+    if (minBufferSize <= 0) { Log.e(TAG, "Sound classifier: AudioRecord.getMinBufferSize failed"); stop(context); return }
+    val record = try {
+      // A few windows' worth of headroom so a brief scheduling delay on the reader side can't
+      // overflow AudioRecord's own internal buffer and force it to drop samples.
+      AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE_HZ, AudioFormat.CHANNEL_IN_MONO,
+          AudioFormat.ENCODING_PCM_16BIT, maxOf(minBufferSize, inputSampleCount * 2 * 4))
+    } catch (e: Exception) { Log.e(TAG, "Sound classifier: AudioRecord init failed", e); null }
+    if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+      record?.release()
+      Log.e(TAG, "Sound classifier: AudioRecord not initialized")
+      stop(context)
+      return
+    }
+    audioRecord = record
+
     try {
-      audioRecord?.startRecording()
+      record.startRecording()
     } catch (e: Exception) {
       Log.e(TAG, "Sound classifier: failed to start recording", e)
       stop(context)
@@ -125,36 +188,61 @@ object SoundClassifierService : Service {
     try { audioRecord?.stop() } catch (e: Exception) {}
     audioRecord?.release()
     audioRecord = null
-    tensorAudio = null
-    classifier?.close()
-    classifier = null
+    interpreter?.close()
+    interpreter = null
+    inputBuffer = null
+    outputBuffer = null
+    curatedIndexSensors = emptyList()
+    labels = emptyList()
     // unavailable, not "nothing detected" — the classifier isn't running at all
     for (sensor in curatedLabelSensors.values) AESPHomeService.instance?.reportSensor(sensor, null)
     AESPHomeService.instance?.reportTextSensor(DetectedSoundSensor, null)
   }
 
+  // Blocks until a full, contiguous window of live audio has arrived (no fixed poll interval
+  // needed — AudioRecord.read() itself paces this to real time), classifies it, then starts
+  // reading the next window immediately, so consecutive windows cover the input stream with
+  // no gap.
   private fun loop() {
+    val record = audioRecord ?: return
+    val pcm = ShortArray(inputSampleCount)
     while (running) {
-      try { classify() } catch (e: Exception) { Log.e(TAG, "Sound classifier: inference failed", e) }
-      try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) {}
+      var offset = 0
+      while (running && offset < pcm.size) {
+        val read = record.read(pcm, offset, pcm.size - offset)
+        if (read <= 0) break
+        offset += read
+      }
+      if (offset == pcm.size) {
+        try { classify(pcm) } catch (e: Exception) { Log.e(TAG, "Sound classifier: inference failed", e) }
+      }
     }
   }
 
-  private fun classify() {
-    val record = audioRecord ?: return
-    val tensor = tensorAudio ?: return
-    val c = classifier ?: return
+  private fun classify(pcm: ShortArray) {
+    val interp = interpreter ?: return
+    val input = inputBuffer ?: return
+    val output = outputBuffer ?: return
+    val context = appContext
 
-    tensor.load(record)
-    val categories = c.classify(tensor).firstOrNull()?.categories ?: emptyList()
-    val byLabel = categories.associateBy { it.label }
+    input.rewind()
+    val inFloats = input.asFloatBuffer()
+    for (i in pcm.indices) inFloats.put(i, pcm[i] / 32768f)
+    output.rewind()
 
-    for ((label, sensor) in curatedLabelSensors) {
-      AESPHomeService.instance?.reportSensor(sensor, byLabel.containsKey(label))
+    interp.run(input, output)
+
+    output.rewind()
+    val scores = FloatArray(numClasses)
+    output.asFloatBuffer().get(scores)
+
+    val threshold = if (context != null) getSetting(context, confidenceSetting) / 100f else 0.5f
+    for ((index, sensor) in curatedIndexSensors) {
+      AESPHomeService.instance?.reportSensor(sensor, scores[index] >= threshold)
     }
 
-    val top = categories.maxByOrNull { it.score }
-    AESPHomeService.instance?.reportTextSensor(DetectedSoundSensor, top?.label)
+    val topIndex = scores.indices.maxByOrNull { scores[it] }
+    AESPHomeService.instance?.reportTextSensor(DetectedSoundSensor, topIndex?.let { labels.getOrNull(it) })
   }
 }
 

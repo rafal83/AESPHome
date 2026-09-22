@@ -301,6 +301,7 @@ enum class UiSection(val label: String) {
   CAMERA("Camera & Streaming"),
   BLUETOOTH("Bluetooth"),
   MEDIA("Media"),
+  SOUND("Sound"),
   SENSORS("Sensors"),
   DIAGNOSTICS("Diagnostics"),
   APP_CONTROL("App Control"),
@@ -322,14 +323,16 @@ internal val UI_SECTION_BY_ID: Map<String, UiSection> = buildMap {
 
   for (id in listOf("media_player", "system_volume")) put(id, UiSection.MEDIA)
 
+  for (id in listOf("decibel_meter", "sound_classifier", "dog_barking", "baby_crying",
+      "screaming", "glass_breaking", "smoke_alarm", "siren", "doorbell", "knocking",
+      "gunshot", "detected_sound")) put(id, UiSection.SOUND)
+
   for (id in listOf("battery_percent", "battery_charging", "battery_temperature_c",
-      "device_movement", "device_orientation", "light_sensor", "decibel_meter",
+      "device_movement", "device_orientation", "light_sensor",
       "proximity", "pressure", "relative_humidity", "ambient_temperature", "wifi_rssi",
       "accelerometer_x", "accelerometer_y", "accelerometer_z",
       "gyroscope_x", "gyroscope_y", "gyroscope_z",
-      "magnetic_field_x", "magnetic_field_y", "magnetic_field_z",
-      "sound_classifier", "dog_barking", "baby_crying", "screaming", "glass_breaking",
-      "smoke_alarm", "siren", "doorbell", "knocking", "gunshot", "detected_sound")) put(id, UiSection.SENSORS)
+      "magnetic_field_x", "magnetic_field_y", "magnetic_field_z")) put(id, UiSection.SENSORS)
 
   for (id in listOf("android_version", "device_model", "app_version", "ip_address",
       "wifi_ssid", "wifi_bssid", "charging_source", "foreground_app", "uptime",
