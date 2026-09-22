@@ -1,0 +1,13 @@
+yamnet.tflite
+
+Source: https://tfhub.dev/google/lite-model/yamnet/classification/tflite/1
+Published by: Google, as the official TensorFlow Lite Task Library audio-classification variant
+of YAMNet (includes the bundled AudioSet label metadata the Task Library's AudioClassifier
+API reads directly from the model).
+License: Apache License 2.0 (standard licensing for TensorFlow/TensorFlow Hub's official
+published models). Verify against the current terms at https://www.tensorflow.org/lite/models
+before redistributing under different terms.
+
+Used by sensors/sound_classifier.kt for on-device sound event classification (binary_sensor.*
+for a curated subset of labels, text_sensor.detected_sound for the raw top match) —
+AudioSet-trained, 521 sound event classes.

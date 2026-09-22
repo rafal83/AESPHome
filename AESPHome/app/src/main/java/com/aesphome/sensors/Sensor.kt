@@ -214,7 +214,9 @@ object Sensors {
     MagneticFieldXSensor, MagneticFieldYSensor, MagneticFieldZSensor,
     MjpegServerRunningSensor,
     PersonDetectedSensor, PersonCountSensor,
-    RtspServerRunningSensor
+    RtspServerRunningSensor,
+    DogBarkingSensor, BabyCryingSensor, ScreamingSensor, GlassBreakingSensor,
+    SmokeAlarmSensor, SirenSensor, DoorbellSensor, KnockingSensor, GunshotSensor
   )
 
   val readSensors: List<ReadSensor> = listOf(
@@ -244,7 +246,10 @@ object Sensors {
     MjpegUrlSensor,
     RtspUrlSensor
   )
-  val textSensors: List<TextSensor> = readTextSensors
+  // DetectedSoundSensor isn't a ReadTextSensor — it's pushed by sound_classifier.kt whenever
+  // a new classification result arrives, not polled on a timer, so it's added only here
+  // (dispatch/registration) and not to readTextSensors (which diagnosticsLoop polls).
+  val textSensors: List<TextSensor> = readTextSensors + listOf(DetectedSoundSensor)
 
   // update.* — see UpdateEntity's doc comment. Just AutoUpdateService itself: it's both the
   // Service driving the periodic check (settings, start/stop) and the one Update entity HA
@@ -263,6 +268,7 @@ object Sensors {
     AppLauncherService,
     PersonDetectorService,
     RtspServerService,
+    SoundClassifierService,
     // NOT AutoUpdateService here — it's already in `updates` below, and toggleables (built
     // from every list in this object, including both of these) would otherwise contain it
     // twice, rendering two duplicate "AESPHome Firmware" rows (two switches, two copies of
@@ -321,7 +327,9 @@ internal val UI_SECTION_BY_ID: Map<String, UiSection> = buildMap {
       "proximity", "pressure", "relative_humidity", "ambient_temperature", "wifi_rssi",
       "accelerometer_x", "accelerometer_y", "accelerometer_z",
       "gyroscope_x", "gyroscope_y", "gyroscope_z",
-      "magnetic_field_x", "magnetic_field_y", "magnetic_field_z")) put(id, UiSection.SENSORS)
+      "magnetic_field_x", "magnetic_field_y", "magnetic_field_z",
+      "sound_classifier", "dog_barking", "baby_crying", "screaming", "glass_breaking",
+      "smoke_alarm", "siren", "doorbell", "knocking", "gunshot", "detected_sound")) put(id, UiSection.SENSORS)
 
   for (id in listOf("android_version", "device_model", "app_version", "ip_address",
       "wifi_ssid", "wifi_bssid", "charging_source", "foreground_app", "uptime",

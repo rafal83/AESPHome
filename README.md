@@ -172,8 +172,19 @@ update installs with zero taps.
 | Wi-Fi RSSI / frequency / link speed | — | `sensor.wifi_*` |
 | Device movement / orientation | — | `binary_sensor.device_movement`, `sensor.device_orientation` |
 | Ambient noise (dB) | Microphone permission | `sensor.ambient_noise` |
+| Sound classification (on-device TFLite) | Microphone permission | `binary_sensor.dog_barking`, `binary_sensor.baby_crying`, `binary_sensor.screaming`, `binary_sensor.glass_breaking`, `binary_sensor.smoke_alarm`, `binary_sensor.siren`, `binary_sensor.doorbell`, `binary_sensor.knocking`, `binary_sensor.gunshot`, `text_sensor.detected_sound` |
 | Proximity, pressure, humidity, ambient temperature | Matching hardware (hidden if absent) | `sensor.*` |
 | Accelerometer / gyroscope / magnetic field (x/y/z) | Matching hardware (hidden if absent) | `sensor.*` |
+
+Sound classification runs a small on-device audio event model (YAMNet, bundled, CPU-only,
+~4.1MB, 521 AudioSet classes) continuously against the microphone — no audio leaves the
+device. Unlike the ambient noise level above (a periodic burst sample, fine for a slowly-
+changing average), this keeps the microphone open the whole time it's enabled so a short
+event can't fall in a gap between samples. Only a curated subset of labels gets its own
+entity; `text_sensor.detected_sound` reports whatever the single highest-confidence class was
+on the last check (off by default in HA), for anything not in the curated list. Adds
+`tensorflow-lite-task-audio` (~roughly the same footprint as person detection's vision
+counterpart); opt-in and off by default.
 
 ### Diagnostics
 

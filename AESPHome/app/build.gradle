@@ -9,10 +9,13 @@ android {
 
   defaultConfig {
     applicationId "com.aesphome"
-    minSdk 22
+    // 23, not 22: tensorflow-lite-task-audio (sound_classifier.kt) declares a minSdk of 23
+    // itself. The project's actual stated target is Android 9 (FAQ.md) — 22 was just a
+    // permissive floor, not a real requirement, so this costs nothing in practice.
+    minSdk 23
     targetSdk 34
-    versionCode 22
-    versionName "2026.9.9"
+    versionCode 23
+    versionName "2026.9.10"
   }
 
   // Only configured when a keystore is actually present (release.yml decodes
@@ -82,6 +85,10 @@ dependencies {
   // (no tensorflow-lite-gpu) since the GPU delegate's device/driver compatibility is far less
   // predictable than CPU across the old/low-end Android hardware this project targets.
   implementation 'org.tensorflow:tensorflow-lite-task-vision:0.4.4'
+  // Sound event classification (sensors/sound_classifier.kt) — same Task Library family/
+  // version as the vision one above, just its audio counterpart (AudioClassifier); also
+  // CPU-only for the same reason.
+  implementation 'org.tensorflow:tensorflow-lite-task-audio:0.4.4'
   // Noise Protocol Framework (ESPHome's encrypted API transport, noise.kt) — a small,
   // purpose-built pure-Java implementation of the actual protocol state machine (handshake
   // patterns, symmetric/cipher state, split()), not just raw crypto primitives, so this

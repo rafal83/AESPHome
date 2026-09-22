@@ -26,6 +26,8 @@ private val KNOWN_IDS = listOf(
   "accelerometer_x", "accelerometer_y", "accelerometer_z",
   "gyroscope_x", "gyroscope_y", "gyroscope_z",
   "magnetic_field_x", "magnetic_field_y", "magnetic_field_z",
+  "sound_classifier", "dog_barking", "baby_crying", "screaming", "glass_breaking",
+  "smoke_alarm", "siren", "doorbell", "knocking", "gunshot", "detected_sound",
   "android_version", "device_model", "app_version", "ip_address",
   "wifi_ssid", "wifi_bssid", "charging_source", "foreground_app", "uptime",
   "free_memory", "total_memory", "free_storage", "total_storage",
