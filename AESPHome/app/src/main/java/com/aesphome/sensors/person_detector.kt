@@ -16,23 +16,34 @@ import org.tensorflow.lite.task.vision.detector.ObjectDetector
     binary_sensor.person_detected / sensor.person_count — a small on-device object detector
     (TFLite Task Library + a bundled EfficientDet-Lite0 model, assets/efficientdet_lite0.tflite,
     ~4.3MB, CPU-only) run against whatever frame CameraService's existing capture pipeline
-    already produced. Same "no second camera open" principle as the MJPEG server: this
-    doesn't run its own capture loop — it periodically asks CameraService for a one-shot frame
-    (onImageRequest(stream=false), the same call the idle loop and a one-shot CameraImageRequest
-    use), and separately reacts to whatever frame a live HA/MJPEG viewer is already pulling.
+    already produced. Same "no second camera open" principle as the MJPEG server: this never
+    opens its own camera session — it keeps CameraService's shared stream alive with the same
+    keepalive re-request MJPEG's own live view uses (onImageRequest(stream=true), re-sent well
+    inside CAMERA_STREAM_TIMEOUT_MS), and reacts to whichever frames arrive, from its own
+    keepalive or a live HA/MJPEG viewer's.
+
+    This used to instead poll with its own one-shot capture on a timer (stream=false) — a
+    full camera open -> AE/AF calibrate -> capture -> close cycle every single trigger, not a
+    cheap read. At a fast interval that's genuinely heavy (confirmed live: near-continuous
+    camera power-cycling, enough on its own to outpace a modest charger). Keeping one session
+    open the whole time this service runs pays that open/calibrate cost once instead of on
+    every trigger, which is what makes a fast interval affordable here.
 
     Inference is genuinely slow relative to a camera frame arriving (tens to a few hundred ms
     on the low-end/older hardware this project targets), so it's kept off CameraService's own
     capture thread entirely — the frame listener callback below just hands the JPEG to a
     dedicated single-thread executor and returns immediately; a frame that arrives while the
-    previous one is still being processed is simply skipped (never queued), so this can never
-    build an unbounded backlog or fall further and further behind.
+    previous one is still being processed, or before intervalSetting has elapsed since the
+    last one accepted, is simply skipped (never queued), so this can never build an unbounded
+    backlog or fall further and further behind, and inference itself stays bounded to roughly
+    once per interval even though frames arrive continuously.
 
 */
 
 
 private const val MODEL_ASSET = "efficientdet_lite0.tflite"
 private const val LABEL_PERSON = "person"
+private const val STREAM_KEEPALIVE_MS = 2000L // comfortably under CameraService's CAMERA_STREAM_TIMEOUT_MS
 
 object PersonDetectorService : Service {
   override val id                  = "person_detector"
@@ -48,14 +59,14 @@ object PersonDetectorService : Service {
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
       enabledByDefaultHa = false, icon = "mdi:tune")
 
-  // 30s, not the original 5s default: each trigger is a full camera open -> AE/AF
-  // calibrate -> capture -> close cycle (see CameraService.capture()), not just a cheap
-  // frame read — at 5s that's ~700 full camera power-cycles/hour, run forever, which is
-  // heavy enough to matter for a device that's supposed to run indefinitely on battery or a
-  // modest charger. Occupancy also doesn't need sub-30s granularity in the first place.
+  // Now just an inference-rate throttle against a continuously-open camera stream (see the
+  // file header comment), not something that gates a full camera power-cycle — so a low
+  // value here is cheap, unlike before this switched to streaming. 2s default: fast enough
+  // that a screen woken on presence feels responsive, without running the detector model
+  // flat-out on every frame the stream produces.
   val intervalSetting = Setting(
       id = "person_detector_interval", label = "Person Detection Interval (s)",
-      default = 30f, min = 1f, max = 300f, step = 1f,
+      default = 2f, min = 1f, max = 300f, step = 1f,
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
       enabledByDefaultHa = false, icon = "mdi:timer-outline")
 
@@ -65,12 +76,17 @@ object PersonDetectorService : Service {
   private var executor: ExecutorService? = null
   @Volatile private var busy = false
   @Volatile private var running = false
+  @Volatile private var lastAcceptedAtMs = 0L
   private var timerThread: Thread? = null
   private var appContext: Context? = null
 
   private val frameListener: (ByteArray) -> Unit = { jpeg ->
-    if (!busy) {
+    val context = appContext
+    val minIntervalMs = if (context != null) (getSetting(context, intervalSetting) * 1000).toLong() else 1000L
+    val now = System.currentTimeMillis()
+    if (!busy && now - lastAcceptedAtMs >= minIntervalMs) {
       busy = true
+      lastAcceptedAtMs = now
       executor?.submit {
         try { runInference(jpeg) } catch (e: Exception) { Log.e(TAG, "Person detector: inference failed", e) }
         finally { busy = false }
@@ -95,6 +111,7 @@ object PersonDetectorService : Service {
     if (!loaded) return
 
     executor = Executors.newSingleThreadExecutor()
+    lastAcceptedAtMs = 0L
     CameraService.addFrameListener(frameListener)
     running = true
     timerThread = Thread({ triggerLoop() }, "AESPHomePersonDetectTimer").apply { start() }
@@ -113,17 +130,17 @@ object PersonDetectorService : Service {
     AESPHomeService.instance?.reportSensor(PersonCountSensor, null)
   }
 
-  // Own periodic trigger — asks CameraService for a fresh one-shot frame at
-  // intervalSetting's cadence, same mechanism its own idle loop uses. Doesn't force a
-  // continuous stream (that would keep the camera open constantly); a live HA/MJPEG viewer
-  // already streaming supplies frames far more often than this loop would ask for anyway,
-  // and the frame listener above reacts to those the same way.
+  // Keeps CameraService's shared stream alive for as long as this service runs — the same
+  // keepalive re-request MJPEG's live view uses (onImageRequest(stream=true) re-sent well
+  // inside CAMERA_STREAM_TIMEOUT_MS). This pays the camera's open/AE-calibrate cost once,
+  // not once per detection — actual detection cadence is the frame listener's own
+  // intervalSetting throttle above, decoupled from how often the camera hardware itself
+  // gets power-cycled.
   private fun triggerLoop() {
     val context = appContext ?: return
     while (running) {
-      try { CameraService.onImageRequest(context, stream = false) } catch (e: Exception) {}
-      val intervalMs = (getSetting(context, intervalSetting) * 1000).toLong()
-      try { Thread.sleep(intervalMs) } catch (_: InterruptedException) {}
+      try { CameraService.onImageRequest(context, stream = true) } catch (e: Exception) {}
+      try { Thread.sleep(STREAM_KEEPALIVE_MS) } catch (_: InterruptedException) {}
     }
   }
 

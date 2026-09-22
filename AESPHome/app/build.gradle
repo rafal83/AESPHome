@@ -11,8 +11,8 @@ android {
     applicationId "com.aesphome"
     minSdk 22
     targetSdk 34
-    versionCode 21
-    versionName "2026.9.8"
+    versionCode 22
+    versionName "2026.9.9"
   }
 
   // Only configured when a keystore is actually present (release.yml decodes
