@@ -171,6 +171,8 @@ proxy messages); every other feature is a new file plus one line in `Sensors`.
 | `binary_sensor.person_detected` | binary_sensor | On-device TFLite detection, "person" class |
 | `sensor.person_count` | sensor | Count of "person" detections in the last inference |
 | `update.aesphome_firmware` | update | Check/Install buttons, real progress bar during download |
+| `binary_sensor.dog_barking` / `baby_crying` / `screaming` / `glass_breaking` / `smoke_alarm` / `siren` / `doorbell` / `knocking` / `gunshot` | binary_sensor | On-device YAMNet sound classification, curated AudioSet labels |
+| `text_sensor.detected_sound` | text_sensor | Single highest-confidence label from the last check, any of YAMNet's 521 classes |
 
 `binary_sensor.screen_on` and `binary_sensor.charging` (as `battery_charging`) already
 existed before this branch and are unchanged.
@@ -423,6 +425,68 @@ fixed here:
   category, which some real apps' launcher activities don't. Switched to `LauncherApps`
   (`AppLauncherSettingsActivity.kt`) — the API real launcher apps use for exactly this.
 
+# Versioning switch, background watchdog, battery-drain root cause, sound classification (v2026.9.7 - v2026.9.11)
+
+Versioning switched from SemVer (`0.x.y`) to CalVer (`YYYY.M.PATCH`), matching ESPHome/Home
+Assistant/Tesla's own convention — `esphome.kt`'s `DeviceInfoResponse.esphome_version` now
+reports this app's own `BuildConfig.VERSION_NAME` directly instead of a separately-maintained
+fake string, since a CalVer version now looks like a plausible real ESPHome release on its own.
+
+- **Background watchdog** (`MainActivity.kt`: `scheduleWatchdog`/`WatchdogReceiver`): a
+  self-rescheduling `AlarmManager` alarm (`setAndAllowWhileIdle`, ~15min) that restarts
+  `AESPHomeService` if the OS killed it outright — found live on a real Amazon Fire OS tablet
+  (`ActivityManager: Stopping service due to app idle` after ~14h idle, despite the foreground
+  declaration that's supposed to exempt it from App Standby). Gated on
+  `switch.start_at_boot`, same switch that already gates `BootReceiver`. Fire OS also hides
+  the standard `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` settings screen for third-party
+  apps, so the Permissions screen's "Battery Optimisation Exemption" row can't reliably fix
+  this from the app itself either — its Enable button now falls back through two additional
+  intents and its description points at `FAQ.md`'s adb workaround, but the watchdog is the
+  actual fix.
+- **Battery-drain root cause found and fixed, live, on real hardware**: reported as "battery
+  drains even plugged in" and confirmed via Home Assistant's own Battery Current sensor
+  (bursty, oscillating discharge, not a smooth drain — the tell). Root cause:
+  `person_detector.kt`'s one-shot capture trigger was a *full* Camera2 open → AE/AF calibrate
+  → capture → close cycle (`CameraService.capture()`), not a cheap read, and its interval was
+  set to 2s — full camera power-cycling roughly every 2-3s around the clock, confirmed via
+  `adb logcat` timestamp diffs matching the in-app setting exactly. Fixed by switching Person
+  Detection to keep `CameraService`'s shared stream open continuously (the same keepalive
+  pattern `mjpeg_server.kt`'s live view already used) instead of one-shot cycling — the
+  interval setting now only throttles the frame listener's actual inference rate, decoupled
+  from the camera hardware's own cycling, so a fast interval (2s default, restored) is cheap
+  again. Verified live: device battery rose from 16% to 34% while plugged in over the course
+  of testing, `dumpsys battery` showing `status: 2` (charging) where it hadn't been before.
+  Also fixed a secondary bug in the same investigation: `CameraService`'s own idle-capture
+  loop was being tricked into thinking a real viewer was present by Person Detection's frame-
+  listener registration (which isn't a viewer — it has its own capture cadence), causing a
+  redundant extra capture cycle every `camera_idle_fps` for no one; fixed via an `isViewer`
+  flag on `addFrameListener`/`removeFrameListener`, set only by `mjpeg_server.kt`'s real
+  viewer registrations.
+- **Sound classification** (`sensors/sound_classifier.kt`): `binary_sensor.dog_barking` /
+  `baby_crying` / `screaming` / `glass_breaking` / `smoke_alarm` / `siren` / `doorbell` /
+  `knocking` / `gunshot`, plus `text_sensor.detected_sound` for whatever the single top match
+  was (not limited to the curated list). Bundles YAMNet (`assets/yamnet.tflite`, ~4.1MB, 521
+  AudioSet classes, Apache 2.0). First implementation used
+  `tensorflow-lite-task-audio`'s high-level `AudioClassifier` (the Task Library API,
+  matching `person_detector.kt`'s `ObjectDetector` pattern) — its native model-loading code
+  (`initJniWithModelFdAndOptions`, `libtask_audio_jni.so`) segfaulted on real hardware loading
+  this exact, officially-published model (`SIGABRT`, "invalid address passed to free"; see
+  [tensorflow/tensorflow#96401](https://github.com/tensorflow/tensorflow/issues/96401) for a
+  related instability report in the same native library). Replaced with the plain
+  `org.tensorflow.lite.Interpreter` runtime driven directly — YAMNet's input/output are both
+  flat float32 tensors, simple enough to feed by hand — plus `MetadataExtractor`
+  (`tensorflow-lite-metadata`, a separate, pure-Java flatbuffer reader, not part of the buggy
+  native surface) to read the model's own bundled label list rather than hardcoding output
+  indices. `minSdk` briefly rose to 23 for `tensorflow-lite-task-audio`'s own manifest floor,
+  then reverted to 22 once that dependency was removed. Unlike `decibel_meter.kt`'s periodic
+  burst-then-close sampling (fine for a slow-changing noise *level*), this keeps one
+  `AudioRecord` open continuously for as long as the service runs and reads contiguous,
+  back-to-back windows — a short event like a knock or a scream could otherwise fall entirely
+  in the gap between decibel_meter's bursts.
+- **Settings screen**: added a `SOUND` `UiSection` (`sensors/Sensor.kt`) — `decibel_meter` and
+  every `sound_classifier` entity moved out of the general `SENSORS` section into their own
+  accordion, at the user's request once the feature existed.
+
 # Remaining work
 
 As of the hardening pass below (Noise encryption, BLE GATT timeout/MTU, auto-update/release
@@ -434,11 +498,14 @@ section for what moved from here to "done." What's left:
   notify, MTU negotiation, and per-operation timeouts all work now; these remaining three are
   the parts tied to security material or fine connection tuning that don't change whether a
   basic GATT session works.
-- **RTSP and Noise: real-device/real-client verification** — both compile, both pass their
-  own unit/round-trip tests, but neither was exercised against the actual reference client it
-  matters most against (a real player for RTSP, a real Home Assistant instance for Noise) —
-  no camera-equipped device or live HA instance was available while building either. See
-  `docs/RTSP_PLAN.md` and `docs/SECURITY.md` for exactly what was and wasn't verified for each.
+- **Noise: real-Home-Assistant verification** — compiles and passes its own round-trip test
+  (a real handshake against a second, independent client-role `HandshakeState` over a loopback
+  socket), but has not been exercised against an actual Home Assistant instance — no live HA
+  was available while building it. See `docs/SECURITY.md` for exactly what was and wasn't
+  verified. (RTSP's equivalent gap has since closed — see `docs/RTSP_PLAN.md`: confirmed
+  working end-to-end against a real VLC player on real hardware, root cause of the "plays then
+  dies" symptom found and fixed, camera contention with Camera/MJPEG/Person Detection
+  understood and enforced in the UI.)
 - **Person detection: only "person" from a general 91-class COCO model** — no dedicated
   face/pose model, no per-region-of-interest configuration, no drawing of bounding boxes back
   onto the MJPEG/RTSP stream (the detection result is a plain HA sensor, not an overlay).

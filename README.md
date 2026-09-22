@@ -117,7 +117,12 @@ than failing confusingly if it detects the conflict.
 Person detection runs a small on-device model (EfficientDet-Lite0, bundled, CPU-only,
 ~4.3MB) against the camera feed — no image or video data leaves the device. It's a genuinely
 new dependency (`tensorflow-lite-task-vision`), adding roughly 18MB to the APK; it's opt-in
-and off by default.
+and off by default. It keeps the camera in one continuously-open stream for as long as it's
+enabled, rather than opening and closing the camera on every check — confirmed on real
+hardware that repeatedly power-cycling the camera (the old design, at a fast interval) is
+heavy enough to drain the battery faster than a modest charger can keep up. Its interval
+setting now only throttles how often the on-device model actually runs, not the camera
+itself, so a fast interval (for something like waking the screen on approach) is cheap.
 
 ### Screen
 
@@ -164,17 +169,22 @@ missing HA feature. Installing still needs one tap on Android's own confirmation
 unless the app has also been made **Device Owner** (see the [FAQ](FAQ.md)), in which case the
 update installs with zero taps.
 
-### Sensors
+`switch.start_at_boot` also gates a background watchdog alarm that restarts the AESPHome
+service if the OS kills it outright (seen on Amazon Fire OS: a foreground service killed by
+App Standby after being idle for several hours, despite the foreground declaration that's
+supposed to exempt it) — it self-reschedules roughly every 15 minutes independently of
+whether the process handling the previous check is still alive. This exists because Fire OS
+also hides the standard Android battery-optimization-exemption screen for third-party apps,
+so the usual fix (granting that exemption) isn't reliably available from the app itself; see
+the [FAQ](FAQ.md) for the adb-based workaround if you want the exemption granted directly
+instead.
+
+### Sound
 
 | Feature | Requirement | Entity |
 |---|---|---|
-| Battery percent / charging / temperature / voltage / current / power / source | Device-dependent | `sensor.battery_*`, `binary_sensor.battery_charging`, `text_sensor.charging_source` |
-| Wi-Fi RSSI / frequency / link speed | — | `sensor.wifi_*` |
-| Device movement / orientation | — | `binary_sensor.device_movement`, `sensor.device_orientation` |
 | Ambient noise (dB) | Microphone permission | `sensor.ambient_noise` |
 | Sound classification (on-device TFLite) | Microphone permission | `binary_sensor.dog_barking`, `binary_sensor.baby_crying`, `binary_sensor.screaming`, `binary_sensor.glass_breaking`, `binary_sensor.smoke_alarm`, `binary_sensor.siren`, `binary_sensor.doorbell`, `binary_sensor.knocking`, `binary_sensor.gunshot`, `text_sensor.detected_sound` |
-| Proximity, pressure, humidity, ambient temperature | Matching hardware (hidden if absent) | `sensor.*` |
-| Accelerometer / gyroscope / magnetic field (x/y/z) | Matching hardware (hidden if absent) | `sensor.*` |
 
 Sound classification runs a small on-device audio event model (YAMNet, bundled, CPU-only,
 ~4.1MB, 521 AudioSet classes) continuously against the microphone — no audio leaves the
@@ -182,9 +192,25 @@ device. Unlike the ambient noise level above (a periodic burst sample, fine for 
 changing average), this keeps the microphone open the whole time it's enabled so a short
 event can't fall in a gap between samples. Only a curated subset of labels gets its own
 entity; `text_sensor.detected_sound` reports whatever the single highest-confidence class was
-on the last check (off by default in HA), for anything not in the curated list. Adds
-`tensorflow-lite-task-audio` (~roughly the same footprint as person detection's vision
-counterpart); opt-in and off by default.
+on the last check (off by default in HA), for anything not in the curated list. Runs on the
+plain `tensorflow-lite` interpreter directly, not the higher-level Task Library
+`AudioClassifier` convenience API used for the same purpose elsewhere in TFLite-based apps —
+that API's native model-loading code segfaulted on real hardware loading this exact,
+officially-published model ([tensorflow/tensorflow#96401](https://github.com/tensorflow/tensorflow/issues/96401)
+tracks a related native-library instability in the same file), so this drives the model by
+hand instead: YAMNet's input/output are both plain flat float32 tensors, simple enough not to
+need the convenience wrapper. Adds `tensorflow-lite` + `tensorflow-lite-metadata` (~roughly
+the same footprint as person detection's vision counterpart); opt-in and off by default.
+
+### Sensors
+
+| Feature | Requirement | Entity |
+|---|---|---|
+| Battery percent / charging / temperature / voltage / current / power / source | Device-dependent | `sensor.battery_*`, `binary_sensor.battery_charging`, `text_sensor.charging_source` |
+| Wi-Fi RSSI / frequency / link speed | — | `sensor.wifi_*` |
+| Device movement / orientation | — | `binary_sensor.device_movement`, `sensor.device_orientation` |
+| Proximity, pressure, humidity, ambient temperature | Matching hardware (hidden if absent) | `sensor.*` |
+| Accelerometer / gyroscope / magnetic field (x/y/z) | Matching hardware (hidden if absent) | `sensor.*` |
 
 ### Diagnostics
 
