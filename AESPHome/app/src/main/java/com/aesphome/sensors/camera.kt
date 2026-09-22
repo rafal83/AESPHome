@@ -339,11 +339,23 @@ object CameraService : Service {
   @Volatile private var lastFrame: ByteArray? = null
   @Volatile private var lastFrameAtMs: Long = 0L
   private val frameListeners = CopyOnWriteArrayList<(ByteArray) -> Unit>()
+  // Counts only listeners that represent an actual person watching frames arrive (MJPEG
+  // viewers) — Person Detection also registers a frame listener below, but it has its own
+  // independent capture cadence (person_detector.kt's triggerLoop) and nobody is looking at
+  // idleLoop's output on its behalf, so its registration must NOT make idleLoop think there's
+  // a viewer to serve (that would silently double the camera's power-cycle rate for no one).
+  @Volatile private var viewerCount = 0
 
   fun latestFrame(): ByteArray? = lastFrame
   fun latestFrameAgeMs(): Long? = lastFrame?.let { System.currentTimeMillis() - lastFrameAtMs }
-  fun addFrameListener(listener: (ByteArray) -> Unit) = frameListeners.add(listener)
-  fun removeFrameListener(listener: (ByteArray) -> Unit) { frameListeners.remove(listener) }
+  fun addFrameListener(listener: (ByteArray) -> Unit, isViewer: Boolean = false) {
+    frameListeners.add(listener)
+    if (isViewer) viewerCount++
+  }
+  fun removeFrameListener(listener: (ByteArray) -> Unit, isViewer: Boolean = false) {
+    frameListeners.remove(listener)
+    if (isViewer) viewerCount--
+  }
 
   private fun broadcastFrame(jpeg: ByteArray) {
     lastFrame = jpeg
@@ -365,7 +377,7 @@ object CameraService : Service {
     val context = appContext ?: return
     while (idleRunning) {
       val idleSeconds = getSetting(context, idleFpsSetting)
-      val hasViewer = AESPHomeService.instance?.hasActiveConnection == true || frameListeners.isNotEmpty()
+      val hasViewer = AESPHomeService.instance?.hasActiveConnection == true || viewerCount > 0
       if (idleSeconds > 0 && hasViewer && !isStreamActive()) {
         capture(context, streaming = false) { broadcastFrame(it) }
       }

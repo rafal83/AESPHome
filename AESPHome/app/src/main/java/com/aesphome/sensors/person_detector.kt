@@ -48,9 +48,14 @@ object PersonDetectorService : Service {
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
       enabledByDefaultHa = false, icon = "mdi:tune")
 
+  // 30s, not the original 5s default: each trigger is a full camera open -> AE/AF
+  // calibrate -> capture -> close cycle (see CameraService.capture()), not just a cheap
+  // frame read — at 5s that's ~700 full camera power-cycles/hour, run forever, which is
+  // heavy enough to matter for a device that's supposed to run indefinitely on battery or a
+  // modest charger. Occupancy also doesn't need sub-30s granularity in the first place.
   val intervalSetting = Setting(
       id = "person_detector_interval", label = "Person Detection Interval (s)",
-      default = 5f, min = 1f, max = 300f, step = 1f,
+      default = 30f, min = 1f, max = 300f, step = 1f,
       deviceUi = true, homeAssistant = true, entityCategory = EntityCategory.CONFIG,
       enabledByDefaultHa = false, icon = "mdi:timer-outline")
 

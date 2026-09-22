@@ -232,12 +232,12 @@ object MjpegServerService : Service {
     if (frame == null) {
       val queue = ArrayBlockingQueue<ByteArray>(1)
       val listener: (ByteArray) -> Unit = { queue.offer(it) }
-      CameraService.addFrameListener(listener)
+      CameraService.addFrameListener(listener, isViewer = true)
       try {
         CameraService.onImageRequest(context, stream = false)
         frame = queue.poll(SINGLE_SHOT_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
       } finally {
-        CameraService.removeFrameListener(listener)
+        CameraService.removeFrameListener(listener, isViewer = true)
       }
     }
     if (frame == null) { writeStatus(socket, 503, "Service Unavailable"); return }
@@ -260,7 +260,7 @@ object MjpegServerService : Service {
     // stream alive for everyone, which is simpler and more failure-tolerant than designating
     // one specific client as "the" pinger and having to reassign that role if it disconnects.
     if (clientCount.incrementAndGet() == 1) Log.i("$TAG/MJPEG", "first stream viewer connected")
-    CameraService.addFrameListener(listener)
+    CameraService.addFrameListener(listener, isViewer = true)
     try {
       val out = socket.getOutputStream()
       out.write(multipartStreamHeader().toByteArray())
@@ -282,7 +282,7 @@ object MjpegServerService : Service {
         out.flush()
       }
     } finally {
-      CameraService.removeFrameListener(listener)
+      CameraService.removeFrameListener(listener, isViewer = true)
       if (clientCount.decrementAndGet() == 0) Log.i("$TAG/MJPEG", "last stream viewer disconnected")
     }
   }
