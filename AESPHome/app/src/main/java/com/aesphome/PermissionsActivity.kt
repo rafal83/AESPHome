@@ -96,12 +96,33 @@ class PermissionsActivity : Activity() {
           { if (isDeviceAdminActive(this)) PermissionStatus.GRANTED else PermissionStatus.DENIED },
           enable = { requestDeviceAdmin(this) }),
 
+      // Some OEM builds hide the screen this intent targets — confirmed on Fire OS, where
+      // Settings > Apps & Notifications > Special access has no "Ignore battery
+      // optimizations" entry at all for third-party apps, making ACTION_REQUEST_..., which
+      // needs that same screen to actually exist, a no-op tap with no error to explain why.
+      // The general list (ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS) is tried as a
+      // fallback since it's occasionally reachable even when the per-app shortcut isn't; if
+      // neither works, note points at the adb-based workaround (FAQ.md) that grants the same
+      // exemption directly — this is also what the background watchdog alarm
+      // (MainActivity.kt: scheduleWatchdog) exists to make unnecessary in the first place.
       PermissionRow("Battery Optimisation Exemption",
           {
             val pm = getSystemService(POWER_SERVICE) as PowerManager
             if (pm.isIgnoringBatteryOptimizations(packageName)) PermissionStatus.GRANTED else PermissionStatus.DENIED
           },
-          enable = { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))) }),
+          note = "If Enable does nothing (seen on Fire OS, which hides this screen for third-party apps): " +
+              "see FAQ.md for an adb-based workaround. AESPHome also self-restarts in the background if killed.",
+          enable = {
+            try {
+              startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            } catch (e: Exception) {
+              try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+              } catch (e2: Exception) {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+              }
+            }
+          }),
 
       // Purely informational — there's nothing to "enable" beyond notifications (above) once
       // the service has actually been started (MainActivity does this every time it opens).

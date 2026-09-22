@@ -2,10 +2,12 @@ package com.aesphome
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlarmManager
 import android.app.AlertDialog
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -73,6 +75,13 @@ class AESPHomeService : Service() {
       startForeground(1, notification)
     }
 
+    // Some OEM builds (confirmed on Fire OS — see PermissionsActivity's Battery Optimisation
+    // row) kill an idle foreground service via App Standby regardless of the manifest's
+    // foreground declaration, and also hide the standard UI this app would otherwise point
+    // the user at to prevent it. The watchdog alarm below is the actual fix: it doesn't stop
+    // the OS from killing the service, it just notices and restarts it.
+    scheduleWatchdog(this)
+
     // AESPHome.start() blocks forever (accept loop), so it needs its own thread.
     // Startup happens here too, after `instance` is set, so anything that reports
     // immediately (like ScreenStateSensor) can't race ahead of it being assigned.
@@ -130,6 +139,45 @@ class BootReceiver : BroadcastReceiver() {
       // from crashing the receiver instead of just leaving the service stopped.
       Log.e(TAG, "startForegroundService from boot failed", e)
     }
+  }
+}
+
+private const val WATCHDOG_INTERVAL_MS = 15 * 60 * 1000L
+
+// Self-rescheduling watchdog alarm: fires every ~15min, asks the OS to (re)start
+// AESPHomeService, then arms itself again — independent of whether the process handling this
+// broadcast is the same one the service last ran in. This exists because some OEM builds kill
+// an idle foreground service outright (confirmed on Fire OS via logcat: "Stopping service due
+// to app idle" after ~14h) despite the foreground declaration that's supposed to exempt it,
+// and — on Fire OS specifically — also hide the standard battery-optimisation-exemption UI a
+// user would otherwise use to prevent that (see PermissionsActivity's Battery Optimisation
+// row). startForegroundService() on an already-running service is a harmless no-op
+// (onCreate() only reruns if the process was actually killed), so this never double-starts
+// anything — it only matters on the runs where the service really is dead.
+// setAndAllowWhileIdle (not setRepeating, which Doze can defer for hours) is the standard
+// pattern for a periodic task that must still eventually fire while idle.
+internal fun scheduleWatchdog(context: Context) {
+  if (!StartAtBootSwitch.isOn(context)) return // same switch that gates BootReceiver — "keep AESPHome running persistently"
+  val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+  val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+      (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0)
+  val pendingIntent = PendingIntent.getBroadcast(context, 0, Intent(context, WatchdogReceiver::class.java), flags)
+  val triggerAt = System.currentTimeMillis() + WATCHDOG_INTERVAL_MS
+  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+    alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
+  } else {
+    alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
+  }
+}
+
+class WatchdogReceiver : BroadcastReceiver() {
+  override fun onReceive(context: Context, intent: Intent) {
+    try {
+      context.startForegroundService(Intent(context, AESPHomeService::class.java))
+    } catch (e: Exception) {
+      Log.e(TAG, "watchdog: startForegroundService failed", e)
+    }
+    scheduleWatchdog(context) // re-arm regardless of outcome above — this loop is the whole point
   }
 }
 

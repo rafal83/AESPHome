@@ -96,6 +96,14 @@
       </intent-filter>
     </receiver>
 
+    <!-- Self-rescheduling watchdog alarm (MainActivity.kt: scheduleWatchdog/WatchdogReceiver)
+         that restarts AESPHomeService if it's been killed outside this app's control (e.g.
+         Fire OS's App Standby kill) — not exported: only this app's own PendingIntent from
+         AlarmManager ever targets it. -->
+    <receiver
+        android:name=".WatchdogReceiver"
+        android:exported="false" />
+
     <receiver
         android:name=".AESPHomeDeviceAdminReceiver"
         android:exported="true"

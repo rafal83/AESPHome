@@ -54,6 +54,23 @@ Once set, the **Permissions** screen shows "Device Owner (silent updates)" as Gr
 This is a device-wide, mostly-irreversible commitment (removing it again generally means a
 factory reset) — only worth it for a device dedicated entirely to running this app.
 
+The "Battery Optimisation Exemption" button in Permissions does nothing — is that broken?
+---
+On some OEM builds (confirmed on Amazon Fire OS), the system screen this button opens doesn't
+exist for third-party apps at all — Fire OS removes "Ignore battery optimizations" from
+Settings > Apps & Notifications > Special access entirely, so there's nothing for the intent
+to land on. This is an OS-level restriction, not something the app can work around by itself.
+
+Two options if this affects you:
+1. You generally don't need to fix it — AESPHome runs a background watchdog alarm that
+   detects if its own service was killed (e.g. by App Standby) and restarts it, typically
+   within 15 minutes, without needing the exemption at all.
+2. To grant the exemption directly anyway:
+```
+adb shell dumpsys deviceidle whitelist +com.aesphome
+```
+Check it took effect with `adb shell dumpsys deviceidle whitelist` (should list `com.aesphome`).
+
 How can I help?
 ---
 Use it, enjoy it, make bug reports, make suggestions for improvements or open a PR and add improvements.
